@@ -22,6 +22,7 @@ typedef enum {
 	NOTIFICATION_LOAD_STATE,
 	NOTIFICATION_SETTING,	  // volume/brightness/colortemp adjustments
 	NOTIFICATION_ACHIEVEMENT, // RetroAchievements unlocks
+	NOTIFICATION_PLAY_TIME,   // Healthy-play reminder
 } NotificationType;
 
 typedef enum {

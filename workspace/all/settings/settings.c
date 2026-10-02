@@ -218,6 +218,19 @@ static int notify_duration_values[] = {1, 2, 3, 4, 5};
 static const char* notify_duration_labels[] = {"1s", "2s", "3s", "4s", "5s"};
 #define NOTIFY_DURATION_COUNT 5
 
+/* Play-time reminders */
+static int playtime_first_values[] = {15, 30, 45, 60, 90, 120, 180, 240};
+static const char* playtime_first_labels[] = {"15m", "30m", "45m", "1h", "1h 30m", "2h", "3h", "4h"};
+#define PLAYTIME_FIRST_COUNT 8
+
+static int playtime_repeat_values[] = {0, 15, 30, 45, 60, 90, 120};
+static const char* playtime_repeat_labels[] = {"Off", "15m", "30m", "45m", "1h", "1h 30m", "2h"};
+#define PLAYTIME_REPEAT_COUNT 7
+
+static int playtime_duration_values[] = {3, 5, 10};
+static const char* playtime_duration_labels[] = {"3s", "5s", "10s"};
+#define PLAYTIME_DURATION_COUNT 3
+
 /* Progress notification duration */
 static int progress_duration_values[] = {0, 1, 2, 3, 4, 5};
 static const char* progress_duration_labels[] = {"Off", "1s", "2s", "3s", "4s", "5s"};
@@ -1247,6 +1260,50 @@ static void reset_notify_duration(void) {
 }
 
 // ============================================
+// Play-time reminder callbacks
+// ============================================
+
+static int get_playtime_enabled(void) {
+	return CFG_getPlayTimeReminderEnabled() ? 1 : 0;
+}
+static void set_playtime_enabled(int v) {
+	CFG_setPlayTimeReminderEnabled(v != 0);
+}
+static void reset_playtime_enabled(void) {
+	CFG_setPlayTimeReminderEnabled(CFG_DEFAULT_PLAYTIME_REMINDER_ENABLED);
+}
+
+static int get_playtime_first(void) {
+	return CFG_getPlayTimeFirstMinutes();
+}
+static void set_playtime_first(int minutes) {
+	CFG_setPlayTimeFirstMinutes(minutes);
+}
+static void reset_playtime_first(void) {
+	CFG_setPlayTimeFirstMinutes(CFG_DEFAULT_PLAYTIME_FIRST_MINUTES);
+}
+
+static int get_playtime_repeat(void) {
+	return CFG_getPlayTimeRepeatMinutes();
+}
+static void set_playtime_repeat(int minutes) {
+	CFG_setPlayTimeRepeatMinutes(minutes);
+}
+static void reset_playtime_repeat(void) {
+	CFG_setPlayTimeRepeatMinutes(CFG_DEFAULT_PLAYTIME_REPEAT_MINUTES);
+}
+
+static int get_playtime_duration(void) {
+	return CFG_getPlayTimeNotificationDuration();
+}
+static void set_playtime_duration(int seconds) {
+	CFG_setPlayTimeNotificationDuration(seconds);
+}
+static void reset_playtime_duration(void) {
+	CFG_setPlayTimeNotificationDuration(CFG_DEFAULT_PLAYTIME_NOTIFICATION_DURATION);
+}
+
+// ============================================
 // About page static display callbacks
 // ============================================
 
@@ -1355,9 +1412,10 @@ static void init_about_info(void) {
 #define MAX_FN_ITEMS 20
 #define MAX_FNKEY_ITEMS 3
 #define MAX_NOTIFY_ITEMS 8
+#define MAX_PLAYTIME_ITEMS 5
 #define MAX_ABOUT_ITEMS 8
 #define MAX_SIMPLE_MODE_ITEMS 2
-#define MAX_MAIN_ITEMS 15
+#define MAX_MAIN_ITEMS 16
 
 static SettingItem appearance_items[MAX_APPEARANCE_ITEMS];
 static SettingItem display_items[MAX_DISPLAY_ITEMS];
@@ -1365,6 +1423,7 @@ static SettingItem system_items[MAX_SYSTEM_ITEMS];
 static SettingItem fn_items[MAX_FN_ITEMS];
 static SettingItem fnkey_items[MAX_FNKEY_ITEMS];
 static SettingItem notify_items[MAX_NOTIFY_ITEMS];
+static SettingItem playtime_items[MAX_PLAYTIME_ITEMS];
 static SettingItem about_items[MAX_ABOUT_ITEMS];
 static SettingItem simple_mode_items[MAX_SIMPLE_MODE_ITEMS];
 static SettingItem main_items[MAX_MAIN_ITEMS];
@@ -1376,6 +1435,7 @@ static SettingsPage fn_page;
 static SettingsPage fn_switch_page; /* wraps fn_items into "FN Switch" titled page */
 static SettingsPage fn_keys_page;
 static SettingsPage notify_page;
+static SettingsPage playtime_page;
 static SettingsPage about_page;
 static SettingsPage simple_mode_page;
 static SettingsPage main_page;
@@ -1602,6 +1662,9 @@ static void reset_fn_page(void) {
 }
 static void reset_notify_page(void) {
 	settings_page_reset_all(&notify_page);
+}
+static void reset_playtime_page(void) {
+	settings_page_reset_all(&playtime_page);
 }
 
 static SettingItem* refresh_emulist_item = NULL;
@@ -2003,6 +2066,27 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	init_page(&notify_page, "Settings | In-game notifications", notify_items, idx, 0);
 
 	// ============================
+	// Play-time reminders page
+	// ============================
+	idx = 0;
+	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Enable reminders", "Show healthy-play reminders while a game is running",
+		on_off_labels, 2, on_off_values, get_playtime_enabled, set_playtime_enabled, reset_playtime_enabled);
+	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"First reminder", "Play time before the first reminder in each game session",
+		playtime_first_labels, PLAYTIME_FIRST_COUNT, playtime_first_values, get_playtime_first, set_playtime_first, reset_playtime_first);
+	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Repeat interval", "Time between later reminders; Off shows only the first",
+		playtime_repeat_labels, PLAYTIME_REPEAT_COUNT, playtime_repeat_values, get_playtime_repeat, set_playtime_repeat, reset_playtime_repeat);
+	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Reminder duration", "How long the reminder stays on screen",
+		playtime_duration_labels, PLAYTIME_DURATION_COUNT, playtime_duration_values, get_playtime_duration, set_playtime_duration, reset_playtime_duration);
+	playtime_items[idx++] = (SettingItem)ITEM_BUTTON_INIT(
+		"Reset to defaults", "Resets all options in this menu to their default values.",
+		reset_playtime_page);
+	init_page(&playtime_page, "Settings | Play-time reminders", playtime_items, idx, 0);
+
+	// ============================
 	// Simple Mode page
 	// ============================
 	idx = 0;
@@ -2048,6 +2132,8 @@ static void build_menu_tree(const DeviceInfo* dev) {
 		"Appearance", "UI customization", &appearance_page);
 	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
 		"In-game Notifications", "Save state notifications", &notify_page);
+	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
+		"Play-time Reminders", "Healthy-play reminders during games", &playtime_page);
 
 	if (has_leds(dev)) {
 		led_page_ptr = led_page_create();
@@ -2116,7 +2202,7 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	{
 		SettingsPage* pages[] = {
 			&appearance_page, &display_page, &system_page,
-			&fn_switch_page, &notify_page, &simple_mode_page, NULL};
+			&fn_switch_page, &notify_page, &playtime_page, &simple_mode_page, NULL};
 		for (int p = 0; pages[p]; p++) {
 			for (int i = 0; i < pages[p]->item_count; i++) {
 				settings_item_sync(&pages[p]->items[i]);
