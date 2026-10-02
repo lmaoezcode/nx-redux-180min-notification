@@ -1,0 +1,29 @@
+name: Build Play-time Reminders (TG5040)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v5.0.0
+
+      - name: Build Settings and minarch
+        run: |
+          docker run --rm -v "$PWD/workspace:/root/workspace" \
+            ghcr.io/loveretro/tg5040-toolchain:latest \
+            /bin/bash -lc 'source ~/.bashrc && cd /root/workspace/tg5040/libmsettings && make && cd /root/workspace/all/settings && make PLATFORM=tg5040 && cd /root/workspace/all/minarch && make PLATFORM=tg5040'
+
+      - name: Upload TG5040 binaries
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: playtime-reminders-tg5040
+          path: |
+            workspace/all/settings/build/tg5040/settings.elf
+            workspace/all/minarch/build/tg5040/minarch.elf
+          if-no-files-found: error
