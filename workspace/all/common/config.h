@@ -172,6 +172,12 @@ typedef struct
 	bool notifyAdjustments;
 	int notifyDuration;
 
+	// Play-time reminders (minutes; repeat 0 disables reminders after the first)
+	bool playTimeReminderEnabled;
+	int playTimeFirstMinutes;
+	int playTimeRepeatMinutes;
+	int playTimeNotificationDuration;
+
 	// RetroAchievements
 	bool raEnable;
 	char raUsername[64];
@@ -252,6 +258,12 @@ typedef struct
 #define CFG_DEFAULT_NOTIFY_SCREENSHOT true
 #define CFG_DEFAULT_NOTIFY_ADJUSTMENTS true
 #define CFG_DEFAULT_NOTIFY_DURATION 1
+
+// Play-time reminder defaults
+#define CFG_DEFAULT_PLAYTIME_REMINDER_ENABLED false
+#define CFG_DEFAULT_PLAYTIME_FIRST_MINUTES 60
+#define CFG_DEFAULT_PLAYTIME_REPEAT_MINUTES 60
+#define CFG_DEFAULT_PLAYTIME_NOTIFICATION_DURATION 5
 
 // RetroAchievements defaults
 #define CFG_DEFAULT_RA_ENABLE false
@@ -433,6 +445,16 @@ bool CFG_getNotifyAdjustments(void);
 void CFG_setNotifyAdjustments(bool enable);
 int CFG_getNotifyDuration(void);
 void CFG_setNotifyDuration(int seconds);
+
+// Play-time reminder settings
+bool CFG_getPlayTimeReminderEnabled(void);
+void CFG_setPlayTimeReminderEnabled(bool enable);
+int CFG_getPlayTimeFirstMinutes(void);
+void CFG_setPlayTimeFirstMinutes(int minutes);
+int CFG_getPlayTimeRepeatMinutes(void);
+void CFG_setPlayTimeRepeatMinutes(int minutes);
+int CFG_getPlayTimeNotificationDuration(void);
+void CFG_setPlayTimeNotificationDuration(int seconds);
 
 // RetroAchievements settings
 bool CFG_getRAEnable(void);

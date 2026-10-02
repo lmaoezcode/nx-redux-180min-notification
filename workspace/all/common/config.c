@@ -91,6 +91,10 @@ void CFG_defaults(NextUISettings* cfg) {
 		.notifyScreenshot = CFG_DEFAULT_NOTIFY_SCREENSHOT,
 		.notifyAdjustments = CFG_DEFAULT_NOTIFY_ADJUSTMENTS,
 		.notifyDuration = CFG_DEFAULT_NOTIFY_DURATION,
+		.playTimeReminderEnabled = CFG_DEFAULT_PLAYTIME_REMINDER_ENABLED,
+		.playTimeFirstMinutes = CFG_DEFAULT_PLAYTIME_FIRST_MINUTES,
+		.playTimeRepeatMinutes = CFG_DEFAULT_PLAYTIME_REPEAT_MINUTES,
+		.playTimeNotificationDuration = CFG_DEFAULT_PLAYTIME_NOTIFICATION_DURATION,
 
 		.raEnable = CFG_DEFAULT_RA_ENABLE,
 		.raUsername = CFG_DEFAULT_RA_USERNAME,
@@ -315,6 +319,22 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb) {
 			}
 			if (sscanf(line, "notifyDuration=%i", &temp_value) == 1) {
 				CFG_setNotifyDuration(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeReminderEnabled=%i", &temp_value) == 1) {
+				CFG_setPlayTimeReminderEnabled((bool)temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeFirstMinutes=%i", &temp_value) == 1) {
+				CFG_setPlayTimeFirstMinutes(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeRepeatMinutes=%i", &temp_value) == 1) {
+				CFG_setPlayTimeRepeatMinutes(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeNotificationDuration=%i", &temp_value) == 1) {
+				CFG_setPlayTimeNotificationDuration(temp_value);
 				continue;
 			}
 			if (sscanf(line, "raEnable=%i", &temp_value) == 1) {
@@ -913,6 +933,42 @@ void CFG_setNotifyDuration(int seconds) {
 	CFG_sync();
 }
 
+bool CFG_getPlayTimeReminderEnabled(void) {
+	return settings.playTimeReminderEnabled;
+}
+
+void CFG_setPlayTimeReminderEnabled(bool enable) {
+	settings.playTimeReminderEnabled = enable;
+	CFG_sync();
+}
+
+int CFG_getPlayTimeFirstMinutes(void) {
+	return settings.playTimeFirstMinutes;
+}
+
+void CFG_setPlayTimeFirstMinutes(int minutes) {
+	settings.playTimeFirstMinutes = clamp(minutes, 1, 24 * 60);
+	CFG_sync();
+}
+
+int CFG_getPlayTimeRepeatMinutes(void) {
+	return settings.playTimeRepeatMinutes;
+}
+
+void CFG_setPlayTimeRepeatMinutes(int minutes) {
+	settings.playTimeRepeatMinutes = clamp(minutes, 0, 24 * 60);
+	CFG_sync();
+}
+
+int CFG_getPlayTimeNotificationDuration(void) {
+	return settings.playTimeNotificationDuration;
+}
+
+void CFG_setPlayTimeNotificationDuration(int seconds) {
+	settings.playTimeNotificationDuration = clamp(seconds, 1, 30);
+	CFG_sync();
+}
+
 bool CFG_getRAEnable(void) {
 	return settings.raEnable;
 }
@@ -1256,6 +1312,10 @@ static int CFG_serialize(char* buf, size_t cap) {
 	EMIT("notifyScreenshot=%i\n", settings.notifyScreenshot);
 	EMIT("notifyAdjustments=%i\n", settings.notifyAdjustments);
 	EMIT("notifyDuration=%i\n", settings.notifyDuration);
+	EMIT("playTimeReminderEnabled=%i\n", settings.playTimeReminderEnabled);
+	EMIT("playTimeFirstMinutes=%i\n", settings.playTimeFirstMinutes);
+	EMIT("playTimeRepeatMinutes=%i\n", settings.playTimeRepeatMinutes);
+	EMIT("playTimeNotificationDuration=%i\n", settings.playTimeNotificationDuration);
 	EMIT("raEnable=%i\n", settings.raEnable);
 	EMIT("raUsername=%s\n", settings.raUsername);
 	EMIT("raPassword=%s\n", settings.raPassword);

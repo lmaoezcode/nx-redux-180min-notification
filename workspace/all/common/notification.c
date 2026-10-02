@@ -198,6 +198,8 @@ void Notification_push(NotificationType type, const char* message, SDL_Surface* 
 	// Use RA-specific duration for achievement notifications
 	if (type == NOTIFICATION_ACHIEVEMENT) {
 		n->duration_ms = CFG_getRANotificationDuration() * 1000;
+	} else if (type == NOTIFICATION_PLAY_TIME) {
+		n->duration_ms = CFG_getPlayTimeNotificationDuration() * 1000;
 	} else {
 		n->duration_ms = CFG_getNotifyDuration() * 1000;
 	}

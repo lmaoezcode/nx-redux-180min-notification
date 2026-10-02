@@ -18,6 +18,7 @@
 #include "audio_manager.h"
 #include "utils.h"
 #include "notification.h"
+#include "play_time.h"
 #include "config.h"
 #include "ra_integration.h"
 #include "ma_internal.h"
@@ -236,6 +237,8 @@ void hdmimon(void) {
 #define PWR_UPDATE_FREQ 5
 #define PWR_UPDATE_FREQ_INGAME 20
 
+static PlayTimeTracker playtime_tracker;
+
 int main(int argc, char* argv[]) {
 	PATHS_init(PLATFORM);
 	if (argc >= 4 && argc <= 5 && !strcmp(argv[1], "--dump-options"))
@@ -328,6 +331,7 @@ int main(int argc, char* argv[]) {
 	AudioMgr_setCallback(Audio_onSinkChanged);
 	Menu_init();
 	Notification_init();
+	PlayTimeTracker_init(&playtime_tracker, SDL_GetTicks(), CFG_getPlayTimeFirstMinutes());
 
 	// Load game for RetroAchievements tracking (must be after Notification_init)
 	// Pass ROM data if available, otherwise just path (for cores that load from file)
@@ -429,8 +433,15 @@ int main(int argc, char* argv[]) {
 		// Process RetroAchievements for this frame
 		RA_doFrame();
 
-		// Update and render notifications overlay
-		Notification_update(SDL_GetTicks());
+		// Update healthy-play reminders and the notification overlay.
+		uint32_t notification_now = SDL_GetTicks();
+		char playtime_message[NOTIFICATION_MAX_MESSAGE];
+		if (PlayTimeTracker_update(&playtime_tracker, notification_now,
+				CFG_getPlayTimeReminderEnabled(), CFG_getPlayTimeRepeatMinutes(),
+				playtime_message, sizeof(playtime_message))) {
+			Notification_push(NOTIFICATION_PLAY_TIME, playtime_message, NULL);
+		}
+		Notification_update(notification_now);
 
 		// Poll for volume/brightness/colortemp changes and show system indicators.
 		// Guard the whole block on the setting so we skip three sysfs/msettings
@@ -484,6 +495,7 @@ int main(int argc, char* argv[]) {
 			}
 			PWR_updateFrequency(PWR_UPDATE_FREQ, 1);
 			Menu_loop();
+			PlayTimeTracker_resume(&playtime_tracker, SDL_GetTicks()); // quick-menu time is not play time
 			EmuTime_reset(); // emulated-time pacing restarts after the menu
 			// Process RA async operations while menu is shown
 			RA_idle();
@@ -600,6 +612,7 @@ void minarch_beforeSleep(void) {
 }
 void minarch_afterSleep(void) {
 	Menu_afterSleep();
+	PlayTimeTracker_resume(&playtime_tracker, SDL_GetTicks());
 }
 
 // Platform accessors
