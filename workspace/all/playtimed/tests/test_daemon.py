@@ -63,6 +63,22 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(child.wait(timeout=5), 0)
         self.assertFalse(self.pid.exists())
 
+    def test_sparse_checkpoints_but_clean_exit_saves(self):
+        # While nothing notable happens the SD ledger must not be rewritten
+        # every few seconds (each save is write+fsync+rename on exFAT) ...
+        self.seed(0)
+        child = self.start()
+        self.ready(child)
+        first = self.ledger.stat().st_mtime_ns
+        time.sleep(3.3)
+        self.assertEqual(self.ledger.stat().st_mtime_ns, first,
+                         "ledger rewritten without a reminder, new day or exit")
+        # ... but a clean stop must flush the counted time immediately.
+        self.stop(child)
+        counted = int(self.ledger.read_text().split()[3])
+        self.assertGreaterEqual(counted, 3000)
+        self.assertLess(counted, 6000)
+
     def test_multiple_games_restart_and_no_duplicate(self):
         self.seed(59000)
         config_before = (self.shared / "minuisettings.txt").read_bytes()

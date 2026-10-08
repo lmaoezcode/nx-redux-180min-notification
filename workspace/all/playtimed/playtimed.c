@@ -13,6 +13,12 @@
 #include <time.h>
 #include <unistd.h>
 
+// How often the ledger is checkpointed to the SD card while a game runs. Each
+// checkpoint is a write+fsync+rename on exFAT, so keep it sparse: a crash or
+// sudden power loss costs at most this much counted play time (a clean exit,
+// shutdown, new day or reminder always saves immediately).
+#define CHECKPOINT_INTERVAL_MS 120000
+
 static volatile sig_atomic_t stopping;
 static volatile sig_atomic_t paused;
 static char pid_path[4096], toast_path[4096], suspend_path[4096], osd_menu_path[4096];
@@ -265,7 +271,7 @@ int main(int argc, char** argv) {
 		bool notified = !exiting && active && awake && DailyPlayTime_due(&state, &config) &&
 			notify(&state, &config);
 		if (notified) DailyPlayTime_notified(&state);
-		if (new_day || notified || exiting || now - last_save >= 30000) {
+		if (new_day || notified || exiting || now - last_save >= CHECKPOINT_INTERVAL_MS) {
 			save(state_path, &state);
 			last_save = now; // Bound retries/logging even if the card became read-only.
 		}
