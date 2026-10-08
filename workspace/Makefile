@@ -38,11 +38,17 @@ endif
 	cd ./$(PLATFORM) && make early # eg. other libs
 	cd ./$(PLATFORM)/keymon && make
 	cd ./$(PLATFORM)/sleepmon && make
+ifeq ($(PLATFORM), tg5040)
+	cd ./$(PLATFORM)/usbguard && make
+endif
 	cd ./all/nextui/ && make
 	cd ./all/minarch/ && make
 	cd ./all/libgametimedb/ && make
 	cd ./all/gametimectl/ && make
 	cd ./all/gametime/ && make
+ifeq ($(PLATFORM), tg5040)
+	cd ./all/playtimed/ && make
+endif
 	cd ./all/syncsettings/ && make
 	cd ./all/taskset/ && make
 	cd ./all/nextval/ && make
@@ -54,6 +60,9 @@ endif
 	cd ./all/show2/ && make
 	cd ./all/screenshot/ && make
 	cd ./all/screenrecorder/ && make
+ifeq ($(PLATFORM), tg5040)
+	cd ./all/usbgamepad/ && make
+endif
 	cd ./all/musicplayer/ && make all
 	cd ./all/mediaplayer/ && make
 	cd ./all/imageviewer/ && make
@@ -89,6 +98,9 @@ clean:
 ifneq ($(PLATFORM), desktop)
 	cd ./$(PLATFORM)/keymon && make clean
 	cd ./$(PLATFORM)/sleepmon && make clean
+ifeq ($(PLATFORM), tg5040)
+	cd ./$(PLATFORM)/usbguard && make clean
+endif
 	cd ./all/syncsettings/ && make cleans
 	cd ./all/taskset/ && make clean
 	cd ./all/show2/ && make clean
@@ -108,11 +120,17 @@ endif
 	cd ./all/libgametimedb/ && make clean
 	cd ./all/gametimectl/ && make clean
 	cd ./all/gametime/ && make clean
+ifeq ($(PLATFORM), tg5040)
+	cd ./all/playtimed/ && make clean
+endif
 	cd ./all/nextval/ && make clean
 	cd ./all/settings/ && make clean
 	cd ./all/ratools/ && make clean
 	cd ./all/screenshot/ && make clean
 	cd ./all/screenrecorder/ && make clean
+ifeq ($(PLATFORM), tg5040)
+	cd ./all/usbgamepad/ && make clean
+endif
 	cd ./all/audiomon/ && make clean
 	cd ./all/musicplayer/ && make clean
 	cd ./all/mediaplayer/ && make clean

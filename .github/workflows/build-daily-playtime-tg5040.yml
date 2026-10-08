@@ -1,0 +1,39 @@
+name: Build Daily Play-time Reminders (TG5040)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v5.0.0
+
+      - name: Host logic and daemon integration tests
+        run: |
+          cd workspace/all/playtimed
+          gcc -std=gnu99 -Wall -Wextra -Werror -fsanitize=address,undefined -g daily.c tests/test_daily.c -o /tmp/test_daily
+          /tmp/test_daily
+          gcc -std=gnu99 -Wall -Wextra -Werror -DPLAYTIMED_TEST daily.c playtimed.c -o /tmp/test_playtimed
+          python3 tests/test_daemon.py /tmp/test_playtimed
+          sh -n ../../../skeleton/SYSTEM/tg5040/paks/MinUI.pak/launch.sh
+
+      - name: Build Settings, minarch and daily helper
+        run: |
+          docker run --rm -v "$PWD/workspace:/root/workspace" \
+            ghcr.io/loveretro/tg5040-toolchain:latest \
+            /bin/bash -lc 'source ~/.bashrc && cd /root/workspace/tg5040/libmsettings && make && cd /root/workspace/all/settings && make PLATFORM=tg5040 && cd /root/workspace/all/minarch && make PLATFORM=tg5040 && cd /root/workspace/all/playtimed && make PLATFORM=tg5040'
+
+      - name: Upload TG5040 binaries
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: daily-playtime-tg5040
+          path: |
+            workspace/all/settings/build/tg5040/settings.elf
+            workspace/all/minarch/build/tg5040/minarch.elf
+            workspace/all/playtimed/build/tg5040/playtimed.elf
+          if-no-files-found: error

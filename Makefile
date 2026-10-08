@@ -152,6 +152,9 @@ system:
 ifneq ($(PLATFORM), desktop)
 	cp ./workspace/$(PLATFORM)/keymon/keymon.elf ./build/SYSTEM/$(PLATFORM)/bin/
 	cp ./workspace/$(PLATFORM)/sleepmon/sleepmon.elf ./build/SYSTEM/$(PLATFORM)/bin/
+ifeq ($(PLATFORM), tg5040)
+	cp ./workspace/$(PLATFORM)/usbguard/nx_usb_guard.elf ./build/SYSTEM/$(PLATFORM)/bin/
+endif
 	cp ./workspace/all/syncsettings/build/$(PLATFORM)/syncsettings.elf ./build/SYSTEM/$(PLATFORM)/bin/
 	# taskset: used for CPU-affinity pinning by N64.pak and (tg5050)
 	# PS.pak launch.sh. Built from source here so a full `make deploy` stays
@@ -162,11 +165,17 @@ ifneq ($(PLATFORM), desktop)
 	cp ./workspace/all/show2/build/$(PLATFORM)/show2.elf ./build/SYSTEM/$(PLATFORM)/bin/
 	cp ./workspace/all/screenshot/build/$(PLATFORM)/screenshot.elf ./build/SYSTEM/$(PLATFORM)/bin/
 	cp ./workspace/all/screenrecorder/build/$(PLATFORM)/screenrecorder.elf ./build/SYSTEM/$(PLATFORM)/bin/
+ifeq ($(PLATFORM), tg5040)
+	cp ./workspace/all/usbgamepad/build/$(PLATFORM)/usbgamepad.elf ./build/SYSTEM/$(PLATFORM)/paks/Tools/USB\ Gamepad.pak/
+endif
 
 	# game time tracking
 	cp ./workspace/all/libgametimedb/build/$(PLATFORM)/libgametimedb.so ./build/SYSTEM/$(PLATFORM)/lib
 	cp ./workspace/all/gametimectl/build/$(PLATFORM)/gametimectl.elf ./build/SYSTEM/$(PLATFORM)/bin/
 	cp ./workspace/all/gametime/build/$(PLATFORM)/gametime.elf ./build/SYSTEM/$(PLATFORM)/paks/Tools/Game\ Tracker.pak/
+ifeq ($(PLATFORM), tg5040)
+	cp ./workspace/all/playtimed/build/$(PLATFORM)/playtimed.elf ./build/SYSTEM/$(PLATFORM)/bin/
+endif
 endif
 	cp ./workspace/$(PLATFORM)/libmsettings/libmsettings.so ./build/SYSTEM/$(PLATFORM)/lib
 	cp ./workspace/all/nextui/build/$(PLATFORM)/nextui.elf ./build/SYSTEM/$(PLATFORM)/bin/
@@ -359,6 +368,9 @@ setup: name
 	rm -rf ./build
 	mkdir -p ./releases
 	cp -R ./skeleton ./build
+	# USB Gamepad is a single public tool. Keep a legacy second menu entry out
+	# of generated cards made from an older or dirty skeleton checkout.
+	rm -rf ./build/SYSTEM/tg5040/paks/Tools/USB\ Gamepad\ PC.pak
 	# skeleton/SYSTEM/osd is layered OSD *source*, assembled per-device at
 	# package time by scripts/assemble-osd.sh. It is never shipped verbatim,
 	# so keep build/ a faithful picture of what ships.

@@ -2076,13 +2076,13 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	// ============================
 	idx = 0;
 	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Enable reminders", "Show healthy-play reminders while a game is running",
+		"Enable reminders", "Daily reminders for emulators and ports; resets at midnight",
 		on_off_labels, 2, on_off_values, get_playtime_enabled, set_playtime_enabled, reset_playtime_enabled);
 	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"First reminder", "Play time before the first reminder in each game session",
+		"First reminder", "Total play time today; kept across games and restarts",
 		playtime_first_labels, PLAYTIME_FIRST_COUNT, playtime_first_values, get_playtime_first, set_playtime_first, reset_playtime_first);
 	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Repeat interval", "Time between later reminders; Off shows only the first",
+		"Repeat interval", "More play time between reminders; Off means once per day",
 		playtime_repeat_labels, PLAYTIME_REPEAT_COUNT, playtime_repeat_values, get_playtime_repeat, set_playtime_repeat, reset_playtime_repeat);
 	playtime_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
 		"Reminder duration", "How long the reminder stays on screen",
@@ -2144,7 +2144,7 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
 		"In-game Notifications", "Save state notifications", &notify_page);
 	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
-		"Play-time Reminders", "Healthy-play reminders during games", &playtime_page);
+		"Play-time Reminders", "Daily play time for emulators and ports", &playtime_page);
 
 	if (has_leds(dev)) {
 		led_page_ptr = led_page_create();

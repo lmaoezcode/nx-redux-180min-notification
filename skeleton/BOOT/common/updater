@@ -36,6 +36,17 @@ if [ -z "$PLATFORM" ] && [ -f /usr/trimui/bin/runtrimui.sh ]; then
 	PLATFORM="tg5040"
 fi
 
+# A waiting parent shell keeps its script fd open. Stage the tg5040 entry
+# point too, not only the innermost USB tool, so a real SD unmount can work.
+if [ "$PLATFORM" = tg5040 ] && [ "${NX_UPDATER_IN_RAM:-0}" != 1 ]; then
+	if cp -f "$0" /tmp/nx-updater.sh; then
+		export NX_UPDATER_IN_RAM=1
+		cd /tmp || exit 1
+		exec /bin/sh /tmp/nx-updater.sh "$@"
+	fi
+	echo "Could not stage updater; USB Storage may remain blocked"
+fi
+if [ "$PLATFORM" = tg5040 ]; then cd /tmp || exit 1; fi
 /mnt/SDCARD/.tmp_update/$PLATFORM.sh # &> /mnt/SDCARD/boot.txt
 
 # force shutdown so nothing can modify the SD card

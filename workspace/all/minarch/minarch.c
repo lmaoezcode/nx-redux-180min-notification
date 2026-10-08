@@ -19,6 +19,7 @@
 #include "utils.h"
 #include "notification.h"
 #include "play_time.h"
+#include "../playtimed/client.h"
 #include "config.h"
 #include "ra_integration.h"
 #include "ma_internal.h"
@@ -238,6 +239,16 @@ void hdmimon(void) {
 #define PWR_UPDATE_FREQ_INGAME 20
 
 static PlayTimeTracker playtime_tracker;
+static unsigned daily_pause_reasons;
+
+static void daily_playtime_pause(unsigned reason, int pause) {
+	unsigned before = daily_pause_reasons;
+	if (pause) daily_pause_reasons |= reason;
+	else daily_pause_reasons &= ~reason;
+	// Sleep may happen inside the quick menu: waking must not unpause the menu.
+	if ((!before) != (!daily_pause_reasons))
+		DailyPlayTime_clientPause(daily_pause_reasons != 0);
+}
 
 int main(int argc, char* argv[]) {
 	PATHS_init(PLATFORM);
@@ -436,7 +447,17 @@ int main(int argc, char* argv[]) {
 		// Update healthy-play reminders and the notification overlay.
 		uint32_t notification_now = SDL_GetTicks();
 		char playtime_message[NOTIFICATION_MAX_MESSAGE];
-		if (PlayTimeTracker_update(&playtime_tracker, notification_now,
+		static uint32_t daily_checked_at;
+		static int daily_active;
+		if (!daily_checked_at || notification_now - daily_checked_at >= 1000) {
+			daily_active = DailyPlayTime_clientActive();
+			daily_checked_at = notification_now;
+		}
+		if (daily_active) {
+			// The system toast covers libretro AND ports; don't show a second,
+			// per-game reminder here. Keep the fallback clock paused as well.
+			PlayTimeTracker_resume(&playtime_tracker, notification_now);
+		} else if (PlayTimeTracker_update(&playtime_tracker, notification_now,
 				CFG_getPlayTimeReminderEnabled(), CFG_getPlayTimeRepeatMinutes(),
 				playtime_message, sizeof(playtime_message))) {
 			Notification_push(NOTIFICATION_PLAY_TIME, playtime_message, NULL);
@@ -494,7 +515,9 @@ int main(int argc, char* argv[]) {
 				Netplay_pause();
 			}
 			PWR_updateFrequency(PWR_UPDATE_FREQ, 1);
+			daily_playtime_pause(1, 1);
 			Menu_loop();
+			daily_playtime_pause(1, 0);
 			PlayTimeTracker_resume(&playtime_tracker, SDL_GetTicks()); // quick-menu time is not play time
 			EmuTime_reset(); // emulated-time pacing restarts after the menu
 			// Process RA async operations while menu is shown
@@ -608,10 +631,12 @@ void minarch_setCoreOptionValue(const char* key, const char* value) {
 
 // Sleep state accessors
 void minarch_beforeSleep(void) {
+	daily_playtime_pause(2, 1);
 	Menu_beforeSleep();
 }
 void minarch_afterSleep(void) {
 	Menu_afterSleep();
+	daily_playtime_pause(2, 0);
 	PlayTimeTracker_resume(&playtime_tracker, SDL_GetTicks());
 }
 

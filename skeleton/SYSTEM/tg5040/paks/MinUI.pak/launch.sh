@@ -1,6 +1,17 @@
 #!/bin/sh
 # MinUI.pak
 
+# A shell executing this file from SD pins the filesystem even with cwd=/tmp.
+# Re-exec a RAM copy before starting any long-lived child processes.
+if [ "${NX_MINUI_IN_RAM:-0}" != 1 ]; then
+	if cp -f "$0" /tmp/nx-minui-launch.sh; then
+		export NX_MINUI_IN_RAM=1
+		cd /tmp || exit 1
+		exec /bin/sh /tmp/nx-minui-launch.sh "$@"
+	fi
+	echo "Could not stage supervisor; USB Storage may remain blocked"
+fi
+
 # recover from readonly SD card -------------------------------
 # touch /mnt/writetest
 # sync
@@ -127,6 +138,17 @@ echo 1008000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
 
 keymon.elf & # &> $SDCARD_PATH/keymon.txt &
 
+# Make the SD card available over MTP as soon as NX Redux starts. This is
+# intentionally automatic: connecting the bottom USB-C port needs no app.
+nx_usb_mode.sh restore > /dev/null 2>&1 &
+
+# USB/heat diagnostic runs from RAM, with a bounded one-hour log. It must not
+# become another SD script descriptor that prevents USB Storage unmounting.
+if [ -r "$SYSTEM_PATH/bin/nx_usb_diag.sh" ]; then
+	cp -f "$SYSTEM_PATH/bin/nx_usb_diag.sh" /tmp/nx-usb-diag.sh
+	/bin/sh /tmp/nx-usb-diag.sh > /dev/null 2>&1 &
+fi
+
 # Overlay-mount the SD card's OSD tree onto /usr/trimui/osd — the SD card is
 # the source of truth for the OSD (daemon binary, assets, toast scripts,
 # every widget). trimui_osdd has /usr/trimui/osd hardcoded in the
@@ -191,14 +213,26 @@ if [ -x "$OSD_DST/$OSDD" ]; then
 	# with no SDL window to block on, SDL 2.30 polls every 1 ms (~920 wakeups/s,
 	# ~4.5% of a core while the panel is hidden and idle); the shim polls every
 	# 20 ms while hidden and 1 ms while shown. Bare start if the library is absent.
-	OSDWAIT="$SYSTEM_PATH/lib/libosdwait.so"
+	# OSD catches TERM rather than exiting. Its two SD-mapped libraries must
+	# live in RAM so USB Storage can safely pause the same hidden instance.
+	OSD_RAM_LIB=/tmp/nx-osd-libs
+	mkdir -p "$OSD_RAM_LIB"
+	if cp -f "$SYSTEM_PATH/lib/libbz2.so.1.0" "$OSD_RAM_LIB/libbz2.so.1.0" &&
+		cp -f "$SYSTEM_PATH/lib/libosdwait.so" "$OSD_RAM_LIB/libosdwait.so"; then
+		OSDWAIT="$OSD_RAM_LIB/libosdwait.so"
+		OSD_LIB_PATH="$OSD_RAM_LIB:$LD_LIBRARY_PATH"
+	else
+		OSDWAIT="$SYSTEM_PATH/lib/libosdwait.so"
+		OSD_LIB_PATH="$LD_LIBRARY_PATH"
+		echo "OSD RAM library staging failed; USB Storage must refuse entry"
+	fi
 	if [ -f "$OSDWAIT" ]; then
-		cd "$OSD_DST" && LD_PRELOAD="$OSDWAIT" ./$OSDD &
+		cd "$OSD_DST" && LD_LIBRARY_PATH="$OSD_LIB_PATH" LD_PRELOAD="$OSDWAIT" ./$OSDD &
 	else
 		cd "$OSD_DST" && ./$OSDD &
 	fi
 fi
-cd "$SYSTEM_PATH/bin"
+cd /tmp || exit 1
 
 # Ensure .asoundrc is clean at boot — /etc/asound.conf handles speaker routing.
 # audiomon will write .asoundrc when USB/BT devices connect.
@@ -286,7 +320,7 @@ if [ -f "$AUTO_PATH" ]; then
 	"$AUTO_PATH"
 fi
 
-cd $(dirname "$0")
+cd "$SYSTEM_PATH/paks/MinUI.pak" || exit 1
 
 #######################################
 
@@ -295,6 +329,52 @@ killall -9 show2.elf > /dev/null 2>&1
 
 EXEC_PATH="/tmp/nextui_exec"
 NEXT_PATH="/tmp/next"
+# The per-game helper executes from RAM with cwd in RAM. It closes every SD
+# descriptor after each atomic checkpoint and is stopped before returning to
+# nextui, so it cannot pin the card during a later USB Storage unmount.
+NX_PLAYTIME_DAEMON=""
+if [ -r "$SYSTEM_PATH/bin/playtimed.elf" ]; then
+	if cp "$SYSTEM_PATH/bin/playtimed.elf" /tmp/nx-playtimed.new && \
+		chmod +x /tmp/nx-playtimed.new && mv -f /tmp/nx-playtimed.new /tmp/nx-playtimed.elf; then
+		NX_PLAYTIME_DAEMON=/tmp/nx-playtimed.elf
+	fi
+fi
+
+nx_playtime_start() {
+	unset NX_PLAYTIME_PID
+	[ -n "$NX_PLAYTIME_DAEMON" ] || return 0
+	"$NX_PLAYTIME_DAEMON" --is-game "$1" || return 0
+	rm -f /tmp/nx-playtime.pid
+	(cd /tmp && exec "$NX_PLAYTIME_DAEMON" --run "$$") </dev/null >/tmp/nx-playtime.log 2>&1 &
+	NX_PLAYTIME_CHILD=$!
+	# Never send pause signals or suppress minarch's fallback before the helper
+	# installs handlers, loads the day's ledger and publishes readiness.
+	nx_playtime_tries=0
+	while [ "$nx_playtime_tries" -lt 50 ]; do
+		if [ "$(cat /tmp/nx-playtime.pid 2>/dev/null)" = "$NX_PLAYTIME_CHILD" ]; then
+			export NX_PLAYTIME_PID="$NX_PLAYTIME_CHILD"
+			return 0
+		fi
+		kill -0 "$NX_PLAYTIME_CHILD" 2>/dev/null || break
+		sleep 0.02
+		nx_playtime_tries=$((nx_playtime_tries + 1))
+	done
+	# A helper failure must never prevent the actual game from launching.
+	kill -TERM "$NX_PLAYTIME_CHILD" 2>/dev/null || true
+	wait "$NX_PLAYTIME_CHILD" 2>/dev/null || true
+	NX_PLAYTIME_CHILD=""
+	return 0
+}
+
+nx_playtime_stop() {
+	if [ -n "$NX_PLAYTIME_CHILD" ]; then
+		kill -TERM "$NX_PLAYTIME_CHILD" 2>/dev/null || true
+		wait "$NX_PLAYTIME_CHILD" 2>/dev/null || true
+	fi
+	NX_PLAYTIME_CHILD=""
+	unset NX_PLAYTIME_PID
+}
+
 touch "$EXEC_PATH"  && sync
 while [ -f $EXEC_PATH ]; do
 	nx_update_logs_path
@@ -303,6 +383,11 @@ while [ -f $EXEC_PATH ]; do
 	if [ -f $NEXT_PATH ]; then
 		CMD=`cat $NEXT_PATH`
 		nx_update_logs_path
+		# Preserve the user's USB data mode across tools that temporarily take
+		# ownership of the gadget. Ordinary games do not touch the gadget and
+		# must not tear down/re-enumerate MTP every time they exit.
+		USB_MODE_BEFORE=$(nx_usb_mode.sh status 2>/dev/null)
+		[ "$USB_MODE_BEFORE" = "mtp" ] || USB_MODE_BEFORE=adb
 		# The launcher may be sitting at its 600 MHz idle cap (nextui/
 		# cpu_policy.h); hand every pak the boot-default range instead, the
 		# same state the restore block below leaves. Paks own their clocks
@@ -310,8 +395,35 @@ while [ -f $EXEC_PATH ]; do
 		echo schedutil > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
 		echo 408000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq 2>/dev/null
 		echo 1008000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null
+		# The child cannot change its parent's cwd. Move the supervisor out of
+		# the SD filesystem before USB Storage tries a real (non-lazy) unmount.
+		PAK_RETURN_DIR=""
+		case "$CMD" in
+			*"USB Storage.pak"*) PAK_RETURN_DIR="$PWD"; cd /tmp || exit 1 ;;
+		esac
+		nx_playtime_start "$NEXT_PATH"
 		eval "$CMD"
+		nx_playtime_stop
+		# If USB could not release the block device, do not launch SD programs
+		# or restore MTP behind the safety guard. Logs and recovery stay in RAM.
+		if [ -f /tmp/nx_usb_storage_remount_blocked ]; then
+			echo "USB card recovery is blocked; SD programs will not be launched"
+			while [ -f /tmp/nx_usb_storage_remount_blocked ]; do sleep 2; done
+		fi
+		[ -z "$PAK_RETURN_DIR" ] || cd "$PAK_RETURN_DIR"
 		rm -f $NEXT_PATH
+		# USB Storage now owns its complete restore transaction and retries.
+		# Only Gamepad needs this supervisor fallback; ordinary games leave USB
+		# alone and must not trigger re-enumeration.
+		case "$CMD" in
+			*"USB Gamepad.pak"*)
+				if [ "$USB_MODE_BEFORE" = "mtp" ]; then
+					nx_usb_mode.sh restore > /dev/null 2>&1 &
+				else
+					nx_usb_mode.sh stop > /dev/null 2>&1 &
+				fi
+				;;
+		esac
 		# Restore CPU state (games/tools may change governor and freq)
 		echo schedutil > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
 		echo 408000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq 2>/dev/null

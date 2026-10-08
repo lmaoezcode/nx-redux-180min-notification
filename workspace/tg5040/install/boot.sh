@@ -1,6 +1,16 @@
 #!/bin/sh
 # NOTE: becomes .tmp_update/tg5040.sh
 
+BOOT_SOURCE_DIR=/mnt/SDCARD/.tmp_update
+if [ "${NX_TG5040_BOOT_IN_RAM:-0}" != 1 ]; then
+	if cp -f "$0" /tmp/nx-tg5040-boot.sh; then
+		export NX_TG5040_BOOT_IN_RAM=1
+		cd /tmp || exit 1
+		exec /bin/sh /tmp/nx-tg5040-boot.sh "$@"
+	fi
+	echo "Could not stage platform boot; USB Storage may remain blocked"
+fi
+
 PLATFORM="tg5040"
 SDCARD_PATH="/mnt/SDCARD"
 UPDATE_PATH="$SDCARD_PATH/MinUI.zip"
@@ -36,7 +46,7 @@ if [ -f "$SDCARD_PATH/.media/splash_logo.png" ]; then
 fi
 
 if [ "$SHOW_SPLASH" = "yes" ] ; then
-	cd $(dirname "$0")/$PLATFORM
+	cd "$BOOT_SOURCE_DIR/$PLATFORM"
 	if [ "$DEVICE" = "brick" ] || [ "$DEVICE" = "brickpro" ]; then
 		./show2.elf --mode=daemon --image="$LOGO_PATH" --text="Installing..." --logoheight=144 --fontsize=32 --progress=-1 &
 	else
@@ -75,7 +85,7 @@ echo 0 > /sys/class/led_anim/max_scale
 for pakz in $PAKZ_PATH; do
 	if [ ! -e "$pakz" ]; then continue; fi
 	echo "TEXT:Extracting $pakz" > /tmp/show2.fifo
-	cd $(dirname "$0")/$PLATFORM
+	cd "$BOOT_SOURCE_DIR/$PLATFORM"
 
 	# Consume the pakz ONLY on successful extraction (same defect class as
 	# the MinUI.zip guard below). Unlike MinUI.zip the system boots fine
@@ -99,7 +109,7 @@ done
 
 # install/update
 if [ -f "$UPDATE_PATH" ]; then 
-	cd $(dirname "$0")/$PLATFORM
+	cd "$BOOT_SOURCE_DIR/$PLATFORM"
 	if [ -d "$SYSTEM_PATH" ]; then
 		echo "TEXT:Updating NX Redux" > /tmp/show2.fifo
 	else
@@ -138,6 +148,7 @@ fi
 #kill $SHOW_PID
 
 LAUNCH_PATH="$SYSTEM_PATH/paks/MinUI.pak/launch.sh"
+cd /tmp || exit 1
 if [ -f "$LAUNCH_PATH" ] ; then
 	"$LAUNCH_PATH"
 fi
