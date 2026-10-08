@@ -271,7 +271,7 @@ fi
 
 # Default pugwash config: skip the disclaimer/theme first-run prompts. Only
 # on a fresh install - reinstall/update keeps the user's live config.
-if [ ! -f "$PM_DIR/config/config.json" ]; then
+if [ ! -s "$PM_DIR/config/config.json" ]; then
     mkdir -p "$PM_DIR/config"
     cat > "$PM_DIR/config/config.json" <<'EOF'
 {

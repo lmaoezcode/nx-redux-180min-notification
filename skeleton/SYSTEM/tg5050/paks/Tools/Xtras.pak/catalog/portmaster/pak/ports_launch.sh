@@ -94,6 +94,18 @@ set_controller_layout() {
 }
 
 main() {
+    # armhf-only ports need an ELF interpreter which stock TrimUI does not
+    # provide. Explain the incompatibility before spawning helpers or mounts.
+    if [ ! -e /lib/ld-linux-armhf.so.3 ] && [ ! -e /usr/lib/ld-linux-armhf.so.3 ] &&
+       grep -q 'export PORT_32BIT="Y"' "$ROM_PATH"; then
+        echo "Unsupported 32-bit port: $ROM_NAME; ARMHF loader is missing"
+        if command -v show2.elf >/dev/null 2>&1; then
+            show2.elf --mode=progress --image=/dev/null \
+                --text="This port needs 32-bit ARM. Not supported on this firmware." --timeout=6
+        fi
+        return 0
+    fi
+
     echo "1" >/tmp/stay_awake
     trap "cleanup" EXIT INT TERM HUP QUIT
 
@@ -125,9 +137,14 @@ main() {
         exit 1
     fi
 
-    # Fix hardcoded paths and shebangs
-    sed -i -e "s|/roms/ports/PortMaster|$EMU_DIR|g" \
-           -e '1s|^#!/bin/bash|#!/usr/bin/env bash|' "$ROM_PATH"
+    # Fix hardcoded paths and shebangs only when the launcher actually needs
+    # changing. An unconditional sed -i rewrites the file on every launch,
+    # which changes its mtime and makes ports such as Balatro rebuild forever.
+    if grep -q '/roms/ports/PortMaster' "$ROM_PATH" ||
+       grep -q '^#!/bin/bash$' "$ROM_PATH"; then
+        sed -i -e "s|/roms/ports/PortMaster|$EMU_DIR|g" \
+               -e '1s|^#!/bin/bash|#!/usr/bin/env bash|' "$ROM_PATH"
+    fi
 
     # Apply the global button layout (Settings > System > Button layout).
     # Replaces the old per-runtime xbox_layout marker; the marker is ignored.

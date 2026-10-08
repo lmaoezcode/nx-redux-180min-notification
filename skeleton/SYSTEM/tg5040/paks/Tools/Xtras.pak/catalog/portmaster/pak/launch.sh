@@ -22,10 +22,6 @@
 # Busybox sh + busybox/GNU sed only. Runs with the pak env from
 # MinUI.pak/launch.sh (SDCARD_PATH, SYSTEM_PATH, LOGS_PATH, ...).
 
-rm -f "$LOGS_PATH/portmaster.txt"
-exec >"$LOGS_PATH/portmaster.txt" 2>&1
-echo "$0 $*"
-
 PM_DIR="$SDCARD_PATH/Emus/shared/PortMaster"
 PM_FILES="$PM_DIR/files"
 PORTS_ROM_DIR="$SDCARD_PATH/Roms/Ports (PORTS)"
@@ -34,6 +30,25 @@ PY="$PM_DIR/bin/python3"
 PP="$PM_DIR/pylibs/harbourmaster/platform.py"
 DI="$PM_DIR/device_info.txt"
 HW="$PM_DIR/pylibs/harbourmaster/hardware.py"
+MAIN_LOG="/tmp/nx-portmaster.txt"
+PUGWASH_LOG="/tmp/nx-portmaster-pugwash.txt"
+
+# Keep active logs off the exFAT card while PortMaster updates its JSON files.
+# This also avoids reusing a formerly cross-linked config/log allocation unit.
+rm -f "$MAIN_LOG" "$PUGWASH_LOG"
+exec >"$MAIN_LOG" 2>&1
+echo "$0 $*"
+
+persist_logs() {
+    [ -n "$LOGS_PATH" ] || return 0
+    mkdir -p "$LOGS_PATH"
+    cp -f "$MAIN_LOG" "$LOGS_PATH/portmaster.txt" 2>/dev/null || true
+    cp -f "$PUGWASH_LOG" "$LOGS_PATH/portmaster_pugwash.txt" 2>/dev/null || true
+}
+trap 'persist_logs' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 splash() { # $1 = text, $2 = extra show2 args
     killall -9 show2.elf >/dev/null 2>&1
@@ -79,9 +94,30 @@ esac
 [ ! -e "$PM_DIR/lib/libffi.so.7" ] && [ -e /usr/lib/libffi.so.8 ] && cp /usr/lib/libffi.so.8 "$PM_DIR/lib/libffi.so.7"
 [ ! -e "$PM_DIR/lib/libncurses.so.5" ] && [ -e /usr/lib/libncurses.so.6 ] && cp /usr/lib/libncurses.so.6 "$PM_DIR/lib/libncurses.so.5"
 
-# Default pugwash config: skip the disclaimer/theme first-run prompts.
-if [ ! -f "$PM_DIR/config/config.json" ]; then
+# Python itself needs PortMaster's bundled libraries. Set the complete runtime
+# environment before using Python to validate the JSON files below.
+export LD_LIBRARY_PATH="$SYSTEM_PATH/lib:$PM_DIR/lib:/usr/trimui/lib:/usr/lib:$LD_LIBRARY_PATH"
+export PATH="$SYSTEM_PATH/bin:$PM_DIR/bin:$SHARED_SYSTEM_PATH/bin:/usr/trimui/bin:$PATH"
+export PYSDL2_DLL_PATH="/usr/trimui/lib:/usr/lib"
+export SSL_CERT_FILE="$PM_DIR/ssl/certs/ca-certificates.crt"
+export HOME="$SHARED_USERDATA_PATH/PORTS-portmaster"
+export XDG_DATA_HOME="$SDCARD_PATH/Emus/shared"
+export HM_TOOLS_DIR="$SDCARD_PATH/Emus/shared"
+export HM_PORTS_DIR="$PORTS_ROM_DIR/.ports"
+export HM_SCRIPTS_DIR="$PORTS_ROM_DIR"
+export SDL_GAMECONTROLLERCONFIG_FILE="$PM_DIR/gamecontrollerdb.txt"
+
+# Default pugwash config: skip the disclaimer/theme first-run prompts. Replace
+# non-empty but invalid JSON as well; a prior unsafe USB export could leave a
+# config file containing bytes from an unrelated file.
+CONFIG_OK=0
+if [ -s "$PM_DIR/config/config.json" ]; then
+    "$PY" -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+        "$PM_DIR/config/config.json" >/dev/null 2>&1 && CONFIG_OK=1
+fi
+if [ "$CONFIG_OK" -ne 1 ]; then
     mkdir -p "$PM_DIR/config"
+    rm -f "$PM_DIR/config/config.json"
     cat > "$PM_DIR/config/config.json" <<'EOF'
 {
     "disclaimer": true,
@@ -90,6 +126,12 @@ if [ ! -f "$PM_DIR/config/config.json" ]; then
     "theme-scheme": "Darkest Mode"
 }
 EOF
+fi
+
+if [ -s "$PM_DIR/config/runtimes.json" ] && ! \
+   "$PY" -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+       "$PM_DIR/config/runtimes.json" >/dev/null 2>&1; then
+    rm -f "$PM_DIR/config/runtimes.json"
 fi
 
 # ---- NxRedux patches ------------------------------------------------------
@@ -174,11 +216,40 @@ patch_mod_trimui() {
     sed -i "s|/mnt/SDCARD/Data/home|$SHARED_USERDATA_PATH/PORTS-portmaster|g" "$PM_DIR/mod_TrimUI.txt"
 }
 
+patch_pugwash_scanner() {
+    [ -f "$PM_DIR/pugwash" ] || return 0
+    "$PY" - "$PM_DIR/pugwash" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace(
+    "        except StopIteration:\n"
+    "            del self.scans[scan_dir]\n"
+    "            self.results[scan_dir] = scan_info[0]\n",
+    "        except (StopIteration, OSError):\n"
+    "            del self.scans[scan_dir]\n"
+    "            self.results[scan_dir] = scan_info[0]\n",
+    1,
+)
+text = text.replace(
+    "            if path.is_file():\n"
+    "                total_size += entry.stat().st_size\n",
+    "            if path.is_file():\n"
+    "                total_size += path.stat().st_size\n",
+    1,
+)
+path.write_text(text, encoding="utf-8", newline="\n")
+PY
+}
+
 apply_patches() {
     patch_control_txt
     patch_device_info
     patch_platform_py
     patch_mod_trimui
+    patch_pugwash_scanner
 }
 
 set_controller_layout() { # $1 = nintendo|xbox
@@ -250,16 +321,6 @@ sync_port_artwork() {
 apply_patches
 set_controller_layout xbox
 
-export LD_LIBRARY_PATH="$SYSTEM_PATH/lib:$PM_DIR/lib:/usr/trimui/lib:/usr/lib:$LD_LIBRARY_PATH"
-export PATH="$SYSTEM_PATH/bin:$PM_DIR/bin:$SHARED_SYSTEM_PATH/bin:/usr/trimui/bin:$PATH"
-export PYSDL2_DLL_PATH="/usr/trimui/lib:/usr/lib"
-export SSL_CERT_FILE="$PM_DIR/ssl/certs/ca-certificates.crt"
-export HOME="$SHARED_USERDATA_PATH/PORTS-portmaster"
-export XDG_DATA_HOME="$SDCARD_PATH/Emus/shared"
-export HM_TOOLS_DIR="$SDCARD_PATH/Emus/shared"
-export HM_PORTS_DIR="$PORTS_ROM_DIR/.ports"
-export HM_SCRIPTS_DIR="$PORTS_ROM_DIR"
-export SDL_GAMECONTROLLERCONFIG_FILE="$PM_DIR/gamecontrollerdb.txt"
 mkdir -p "$HOME"
 
 cd "$PM_DIR" || exit 1
@@ -272,7 +333,7 @@ while true; do
     # The splash drew its frame; it must not keep painting over pugwash.
     # -9: show2 never drains SDL events, so SIGTERM is swallowed (see MinUI.pak/launch.sh)
     killall -9 show2.elf >/dev/null 2>&1
-    "$PY" pugwash 2>&1 | tee "$LOGS_PATH/portmaster_pugwash.txt"
+    "$PY" pugwash 2>&1 | tee "$PUGWASH_LOG"
     if [ -f .pugwash-reboot ]; then
         rm -f .pugwash-reboot
         continue
