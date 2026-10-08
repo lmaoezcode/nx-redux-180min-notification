@@ -304,6 +304,8 @@ Module con:
 | `osdmusic` | bridge widget OSD ↔ music service |
 | `osdwait` | `LD_PRELOAD` shim giảm wakeup của stock OSD daemon |
 | `usbgamepad` | biến máy thành USB HID gamepad trên tg5040 |
+| `usbguard` (`nx_usb_guard.elf`) | binary tĩnh AArch64 bọc mỗi giao dịch USB: tạm dừng đúng tiến trình ADB stock, dựng guardian độc lập để một shell bị mất không để ADB dừng mãi; `--holders` liệt kê tiến trình đang giữ SD; `--selftest` |
+| `playtimed` (`playtimed.elf`) | helper theo từng lần mở game: cộng giờ chơi theo ngày vào `.userdata/shared/daily-playtime.txt` và nhắc qua toast OSD; do supervisor khởi chạy, xem mục 8 |
 | `taskset` | helper affinity động phù hợp kernel/toolchain |
 
 ### 5.6 Ứng dụng cấp cao
@@ -419,7 +421,26 @@ Các file liên quan:
 - `workspace/all/settings/settings.c`
 - `workspace/all/common/tests/test_play_time.c`
 
-Lưu ý: chức năng này hiện tích hợp vào minarch/libretro. PortMaster và emulator standalone không đi qua game loop của minarch nên chưa tự nhận notification này nếu không có bridge/daemon riêng.
+Lưu ý: chức năng trên tích hợp vào minarch/libretro. PortMaster và emulator standalone không đi qua game loop của minarch nên không tự nhận notification này; phần đó do `playtimed` đảm nhận (bên dưới).
+
+### 8.0 `playtimed`: nhắc theo tổng giờ trong ngày, mọi loại game
+
+Mã nằm ở `workspace/all/playtimed/` (`daily.c/.h` là logic thuần, `playtimed.c` là daemon, `client.h` là phía minarch, `tests/`). Luồng:
+
+```text
+supervisor MinUI.pak/launch.sh
+  → nx_playtime_start "$NEXT_PATH"      (trước mỗi `eval "$CMD"`)
+      playtimed.elf --is-game <file>    (đọc lệnh đã xếp hàng; tool như Settings/USB Storage không phải game)
+      playtimed.elf --run $$            (chạy nền, cwd /tmp; handshake qua /tmp/nx-playtime.pid)
+  → game chạy; minarch (bản mới) gửi SIGUSR1/SIGUSR2 để tạm dừng khi quick menu/sleep
+  → nx_playtime_stop                    (sau game, trước khi quay về nextui)
+```
+
+Daemon đếm bằng `CLOCK_MONOTONIC`, chỉ cộng khi không bị tạm dừng, không có `/tmp/system_suspend` và OSD menu không mở; ngày dân sự lấy từ giờ địa phương. Cứ `CHECKPOINT_INTERVAL_MS` (120 giây) hoặc khi có nhắc, đổi ngày, thoát, tắt máy/reboot, nó ghi sổ bằng ghi + `fsync` + đổi tên, không giữ descriptor SD. Thông báo là JSON toast ghi vào `/tmp/trimui_osd/osd_toast_msg` (cùng định dạng các script OSD stock). Cấu hình đọc từ cùng bốn key `playTime*` ở trên.
+
+Bất biến: helper lỗi, thiếu, treo hoặc báo sai PID **không bao giờ** được chặn việc mở game (hook trả 0 và dọn helper). Test: `scripts/tests/test-playtime-hook.sh` (hook, chạy cả `busybox sh`), `workspace/all/playtimed/tests/` (đơn vị + daemon). Build/kiểm thử trên Windows: `.dev/CROSS_BUILD_WSL.md`.
+
+Hạn chế đã biết: `minarch.elf` trên thẻ vẫn là bản 2026-10-03 (chưa có `client.h`), nên khi chạy với `playtimed` sẽ nhắc **hai lần** (theo phiên từ minarch, theo ngày từ daemon) và chưa tạm dừng khi mở quick menu. Dựng lại minarch cần toolchain đầy đủ của dự án.
 
 ### 8.1 Khôi phục trên thẻ G ngày 2026-10-03
 
@@ -431,6 +452,8 @@ Sau khi đợt sửa filesystem/emulator/USB/game hoàn tất và bàn giao th�
 Đây là binary nhắc giờ hợp lệ, chủ đích khác checksum của bản stock v1.12.0; không coi việc khác stock là bằng chứng tệp hỏng rồi tự chép đè lại. Hai binary đã kiểm tra ELF64/AArch64, dependency/GLIBC tương ứng với stock, và checksum sau locked flush/dismount/remount. Không thay `nextui.elf`, thư viện chung hay launcher/game/USB trong bước khôi phục này.
 
 Giữ nguyên `minuisettings.txt`: bật nhắc, thông báo 5 giây. Mốc nhắc **hiện tại là 30 phút lần đầu và lặp 30 phút** (người dùng chốt 30/30 ngày 2026-10-08, khớp thẻ G); lúc khôi phục ngày 2026-10-03 từng là 180/30. Bộ đếm áp dụng cho từng phiên chạy minarch, không cộng dồn theo ngày và chưa có bridge cho PortMaster/standalone. Test host đã kiểm tra mốc 180/30, tắt/bật, tắt lặp, menu/sleep, tick wrap và phiên mới; vẫn cần thử thông báo thực tế trên Brick Pro.
+
+**Cập nhật 2026-10-08:** `playtimed.elf` (dựng chéo tĩnh AArch64 trong WSL, 849688 byte, SHA-256 `5E4482B847CA8B566C0AFC6C5AA9BCDAAE2D3433507DBD5D7830C699C0A1D68A`) và supervisor có hook đã được cài lên thẻ G. `minarch.elf` trên thẻ vẫn là bản 9DEB2408… ở trên (nhắc hai lần, xem 8.0). Sổ ghi mỗi 120 giây. Chưa thử trên Brick Pro; hoàn tác bằng bản sao lưu `D:\NXRedux-playtimed-backup-20261008-135003`.
 
 Bản sao lưu trước sửa, bản sao riêng hai binary ngay trước cài và báo cáo đối chiếu nằm tại `D:\NXRedux-backup-20261003`. Mốc kiểm tra sau đợt sửa là `reminder-install-baseline.json`, khác bản sao lưu trước sửa vì chat phối hợp đã phục hồi một số tệp và bổ sung game/launcher. Báo cáo `reminder-install-verification.json` xác nhận 14223 tệp khác không thay đổi so với mốc sau sửa, hai binary khớp bản nhắc giờ, không có tệp mới/mất ngoài dự kiến hay lỗi đọc; kiểm tra filesystem cuối trả exit 0. Đây không phải xác nhận đã chơi thử trên thiết bị hoặc surface-test toàn bộ thẻ. Quy trình và kiểm tra phục hồi nằm ở `.local/playtime-restore-20261003/`; biên bản bàn giao nằm ở `.local/card-repairs/20261003-emulators/playtime-handoff.json`. Luôn bàn giao quyền ghi thẻ giữa các chat trước khi ghi hoặc dismount; không chạy các đợt sửa/cài đồng thời trên cùng volume.
 
@@ -494,11 +517,17 @@ Runtime nằm ở:
 
 Game thường không được gọi `restore` sau khi thoát vì việc đó re-enumerate USB/MTP không cần thiết. Chỉ tool thật sự chiếm USB controller mới được stop/restore mode.
 
+`nx_usb_mode.sh` mọi action trừ `status` đều tự chạy lại qua `nx_usb_guard.elf` (`exec "$USB_GUARD" /bin/sh "$0" ...`) và **thoát lỗi 1 nếu thiếu guard**; supervisor gọi `nx_usb_mode.sh restore` mỗi lần boot, nên **guard phải được cài trước** khi thay `nx_usb_mode.sh`. `detach_gadget()` ghi unbind vào `UDC` rồi chờ tối đa ~2 giây; vì `adbd` stock có thể bind lại UDC ngay sau đó, nó lặp lại đúng lệnh unbind ở nhịp 5/10/15 trong cùng cửa sổ chờ và vẫn thất bại (chặn các bước sau) nếu UDC còn bound. Log MTP ở `/tmp/nx-mtp.log` (RAM), chỉ được chép ra `.userdata/<platform>/logs/usb-mode.txt` khi thẻ đã gắn lại.
+
 ### 11.2 USB Storage/UMS
 
 MTP truy cập file qua protocol và SD vẫn do thiết bị mount. USB Mass Storage thì đưa block device trực tiếp cho host; vì vậy SD bắt buộc phải unmount hoàn toàn trước khi export.
 
-Wrapper `USB Storage.pak/launch.sh` tự chép vào `/tmp`, đổi cwd sang `/tmp`, dừng MTP, `sync`, rồi gọi stock USB Storage. Mục đích là không để script/cwd/log descriptor trên SD cản unmount.
+Wrapper `USB Storage.pak/launch.sh` (bản `safe-v4`) tự chép vào `/tmp` cùng `nx_usb_mode.sh`, `nx_usb_services.sh`, `nx_usb_diag.sh` và `nx_usb_guard.elf`, đổi cwd sang `/tmp`, hiện ngay UI của stock (`/usr/trimui/apps/usb_storage/usb_storage`, **không** gọi launcher stock vì launcher đó tự sửa filesystem), rồi chạy từng bước có thể hủy bằng B: (1) `nx_usb_services.sh prepare` tạm dừng OSD ẩn đang chạy từ thư viện trong RAM và dừng `osdmusic`/`musicplayerd`/`audiomon`/`keymon`; (2) `nx_usb_mode.sh stop` dừng MTP; (3) `umount /mnt/SDCARD`, nếu thất bại thì từ chối; (4) `nx_usb_mode.sh storage-start` xuất block device. Khi thoát, `cleanup()` chạy `storage-detach` (đóng LUN) **trước**, rồi mới mount lại thẻ, khôi phục dịch vụ/OSD và MTP, rồi chép log. Vì vậy sẽ **không** có thông báo "Verifying card" như stock: v4 cố ý không tự sửa filesystem.
+
+Điều kiện tiên quyết: supervisor phải là bản đã chép `libbz2.so.1.0` và `libosdwait.so` vào `/tmp/nx-osd-libs` (khối OSD trong `MinUI.pak/launch.sh`); thiếu nó `nx_usb_services.sh` từ chối và USB Storage không mở được. `run_step` ghi log thời gian `[t=...]` và trạng thái tiến trình đang chờ (S/R/Z) vào `/tmp/nx-usb-storage.txt`.
+
+Đã thử trên Brick Pro ngày 2026-10-08 hai lần (xuất, Windows thấy ổ, thoát bằng B): thứ tự thoát đúng, `chkdsk` chỉ đọc sạch sau mỗi lần. Chưa thử **ghi dữ liệu thật** qua USB Storage. Lần thử đầu log thiếu dòng "stock UI ready" dù đã xuất (script có vẻ không nhận ra bước chuẩn bị đã xong và coi B là hủy giữa chừng); lần có log thời gian không tái hiện, nguyên nhân còn mở. Test host: `scripts/tests/test-usb-safety.py`.
 
 Bất biến an toàn:
 
@@ -593,7 +622,12 @@ Test quan trọng theo vùng:
 - `scripts/tests/test-menu-animations.sh`
 - `scripts/tests/test-osd-overlay-tg5050.sh`
 - `scripts/tests/test-sync-rsync-fat32.sh`
+- `scripts/tests/test-usb-safety.py` (fixture USB/MTP/boot; trên Windows đặt `NX_USB_TEST_TEMP` ở đường dẫn không có dấu cách)
+- `scripts/tests/test-playtime-hook.sh` (hook `playtimed` trong supervisor; thử cả `SH="busybox sh"`)
+- `workspace/all/playtimed/tests/` (đơn vị `daily` và daemon)
 - `workspace/all/musicplayer/tests/run_tests.sh`
+
+Trên Windows nên chạy test trong WSL2 trên bản sao ext4 của repo (working tree CRLF và thiếu bit thực thi làm nhiều test sai). Cách dựng chéo các helper tĩnh (`nx_usb_guard.elf`, `playtimed.elf`) và chạy test của chúng bằng `qemu-user` không cần Docker nằm ở `.dev/CROSS_BUILD_WSL.md`, kèm danh sách test đã biết là lỗi sẵn ở `HEAD` (PortMaster refresh/launch, `dc-netplay`, `art-style` trên GCC mới). `minarch`, `settings`, `nextui` vẫn cần toolchain đầy đủ.
 
 Shell script target thiết bị phải hợp POSIX `sh` trừ khi PortMaster bảo đảm `/bin/bash`. tg5040 BusyBox thiếu nhiều applet; không giả định có `nohup`, `setsid`, `timeout` hoặc `unzip`.
 
@@ -710,5 +744,7 @@ File này là bản tổng hợp. Khi cần chi tiết byte patch, phép đo ph�
 - `.dev/CAPTURE.md`
 - `.dev/MTP.md`
 - `.dev/USB_GAMEPAD.md`
+- `.dev/NX_CONTROLLER_0.1.0_AUDIT.md`
+- `.dev/CROSS_BUILD_WSL.md`
 
 Không sao chép mù các lệnh cũ: luôn đối chiếu script/Makefile hiện tại và trạng thái thật của thiết bị/thẻ trước khi chạy.
