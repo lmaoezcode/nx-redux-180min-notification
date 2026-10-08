@@ -157,7 +157,8 @@ static void guardian(const struct Identity *adb, const struct Identity *worker,
 	if (!completed) { note("worker_aborted_or_deadline", worker->pid); terminate_worker(worker); }
 	bool ok = resume(adb);
 	remove_owned_mode_lock(worker->pid);
-	char result = ok ? 'Y' : 'N'; (void)write(ack, &result, 1);
+	// Best effort: if the parent is already gone there is nobody to tell.
+	char result = ok ? 'Y' : 'N'; if (write(ack, &result, 1) != 1) { /* parent gone */ }
 	_exit(ok ? 0 : 1);
 }
 static int transaction(const struct Identity *adb, char **command, unsigned limit_ms) {
@@ -203,7 +204,8 @@ static int transaction(const struct Identity *adb, char **command, unsigned limi
 	}
 	if (!finished) { terminate_worker(&worker); while (waitpid(worker_pid, &status, 0) < 0 && errno == EINTR) {} }
 	// Do not let an inherited pipe descriptor delay EOF after parent death.
-	c = finished && paused ? 'D' : 'F'; (void)write(control[1], &c, 1); close(control[1]);
+	// Best effort: the guardian may already have exited; it then recovers on its own.
+	c = finished && paused ? 'D' : 'F'; if (write(control[1], &c, 1) != 1) { /* guardian gone */ } close(control[1]);
 	p = (struct pollfd){ack[0], POLLIN, 0};
 	bool resumed = poll(&p, 1, 1500) > 0 && read(ack[0], &c, 1) == 1 && c == 'Y';
 	close(ack[0]);
