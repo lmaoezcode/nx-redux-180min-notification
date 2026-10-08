@@ -153,21 +153,38 @@ refuse_export() {
 	exit 1
 }
 
+# Diagnostics only (no behaviour change): timestamps and the child's kernel state
+# letter (R/S running or sleeping, Z = finished but not yet reaped) so the log
+# shows whether a step is really still running when this wrapper waits on it.
+nx_trace() {
+	echo "[t=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)] $*"
+}
+nx_pid_state() {
+	awk '{ print $3 }' "/proc/$1/stat" 2>/dev/null || echo "?"
+}
+
 run_step() {
+	nx_trace "step start: $*"
 	"$@" &
 	STEP_PID=$!
+	step_polls=0
 	while kill -0 "$STEP_PID" 2>/dev/null; do
 		if ! kill -0 "$UI_PID" 2>/dev/null; then
+			nx_trace "UI gone while step pid=$STEP_PID state=$(nx_pid_state "$STEP_PID") was still waited on"
 			echo "B/UI exit requested during preparation; cancelling before further USB work"
 			kill -TERM "$STEP_PID" 2>/dev/null || true
 			wait "$STEP_PID" 2>/dev/null
 			STEP_PID=
 			return 125
 		fi
+		step_polls=$((step_polls + 1))
+		# About every 2 s at 0.1 s polls (every 20 s if only sleep 1 exists).
+		[ $((step_polls % 20)) -ne 0 ] || nx_trace "step pid=$STEP_PID still polled after $step_polls polls, state=$(nx_pid_state "$STEP_PID")"
 		usleep 100000 2>/dev/null || sleep 1
 	done
 	wait "$STEP_PID"
 	step_result=$?
+	nx_trace "step finished rc=$step_result after $step_polls polls"
 	STEP_PID=
 	# A very fast step and B may complete together. Do not advance afterwards.
 	[ -n "$UI_PID" ] && kill -0 "$UI_PID" 2>/dev/null || return 125
