@@ -132,6 +132,43 @@ class DaemonTests(unittest.TestCase):
         self.assertIn("Take a break", json.loads(self.toast.read_text())["message"])
         self.stop(child)
 
+    def test_reminder_goes_to_a_live_inline_client_not_the_system_toast(self):
+        # minarch registers its PID; the helper must hand the reminder over
+        # instead of raising the system toast. This test process plays minarch.
+        self.seed(59000)
+        inline = self.runtime / "nx-playtime-inline"
+        due = self.runtime / "nx-playtime-due"
+        inline.write_text(f"{os.getpid()}\n")
+        child = self.start()
+        self.ready(child)
+        time.sleep(1.2)
+        self.assertFalse(self.toast.exists(), "system toast raised although a client is alive")
+        self.assertTrue(due.exists())
+        self.assertIn("Today: 1m", due.read_text())
+        self.stop(child)
+        self.assertEqual(self.ledger.read_text().split()[4], "1")  # counted as notified
+
+    def test_dead_inline_client_falls_back_to_the_system_toast(self):
+        self.seed(59000)
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        (self.runtime / "nx-playtime-inline").write_text(f"{gone.pid}\n")
+        child = self.start()
+        self.ready(child)
+        time.sleep(1.2)
+        self.assertTrue(self.toast.exists())
+        self.assertFalse((self.runtime / "nx-playtime-due").exists())
+        self.stop(child)
+
+    def test_stale_due_file_is_dropped_at_start(self):
+        self.seed(0)
+        due = self.runtime / "nx-playtime-due"
+        due.write_text("Today: 99m. Take a break.\n")
+        child = self.start()
+        self.ready(child)
+        self.assertFalse(due.exists())
+        self.stop(child)
+
     def test_invalid_ledger_is_preserved_and_helper_fails_safely(self):
         self.ledger.write_text("unknown future ledger format\n")
         before = self.ledger.read_bytes()

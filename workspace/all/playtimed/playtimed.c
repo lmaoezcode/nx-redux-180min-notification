@@ -22,6 +22,7 @@
 static volatile sig_atomic_t stopping;
 static volatile sig_atomic_t paused;
 static char pid_path[4096], toast_path[4096], suspend_path[4096], osd_menu_path[4096];
+static char inline_path[4096], due_path[4096];
 
 static void on_signal(int sig) {
 	if (sig == SIGUSR1) paused = 1;
@@ -159,7 +160,26 @@ static bool osd_running(void) {
 #endif
 }
 
+// minarch registers its PID here while it runs under this helper, so a libretro
+// game can show the reminder in NX Redux's own in-game notification style. Ports
+// and anything else keep the system toast. A dead or missing client falls back.
+static bool inline_client_alive(void) {
+	FILE* file = fopen(inline_path, "r");
+	if (!file) return false;
+	long pid = 0;
+	bool read = fscanf(file, "%ld", &pid) == 1;
+	fclose(file);
+	return read && pid > 1 && pid <= 0x7fffffffL && (kill((pid_t)pid, 0) == 0 || errno == EPERM);
+}
+
 static bool notify(const DailyPlayTime* state, const DailyPlayTimeConfig* config) {
+	if (inline_client_alive()) {
+		if (access(due_path, F_OK) == 0) return false; // previous reminder not consumed yet
+		char text[128], line[160];
+		DailyPlayTime_message(state, text, sizeof(text));
+		int length = snprintf(line, sizeof(line), "%s\n", text);
+		return length > 0 && (size_t)length < sizeof(line) && atomic_write(due_path, line, true);
+	}
 	if (access(toast_path, F_OK) == 0 || !osd_running()) return false;
 	int width = 1024, height = 768;
 	const char* device = getenv("DEVICE");
@@ -220,7 +240,9 @@ int main(int argc, char** argv) {
 		!join(suspend_path, sizeof(suspend_path), temporary, "system_suspend") ||
 		!join(poweroff_path, sizeof(poweroff_path), temporary, "poweroff") ||
 		!join(reboot_path, sizeof(reboot_path), temporary, "reboot") ||
-		!join(osd_menu_path, sizeof(osd_menu_path), temporary, "trimui_osd/osdd_show_up")) return 2;
+		!join(osd_menu_path, sizeof(osd_menu_path), temporary, "trimui_osd/osdd_show_up") ||
+		!join(inline_path, sizeof(inline_path), temporary, "nx-playtime-inline") ||
+		!join(due_path, sizeof(due_path), temporary, "nx-playtime-due")) return 2;
 	int lock = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
 	if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB)) {
 		if (lock >= 0) close(lock);
@@ -245,6 +267,7 @@ int main(int argc, char** argv) {
 	int initial_date = civil_day(&after_midnight);
 	DailyPlayTime_tick(&state, initial_date, after_midnight, 0, false);
 	if (!state.date || !save(state_path, &state)) { close(lock); return 1; }
+	unlink(due_path); // a reminder left over from a previous session must not replay
 	char pid_record[32];
 	snprintf(pid_record, sizeof(pid_record), "%ld\n", (long)getpid());
 	if (!atomic_write(pid_path, pid_record, false)) { close(lock); return 1; }

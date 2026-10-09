@@ -452,10 +452,22 @@ int main(int argc, char* argv[]) {
 		if (!daily_checked_at || notification_now - daily_checked_at >= 1000) {
 			daily_active = DailyPlayTime_clientActive();
 			daily_checked_at = notification_now;
+			if (daily_active) {
+				// Register once so the daily helper hands its reminder to us and
+				// it appears in NX Redux's own in-game style, not the system toast.
+				static int inline_announced;
+				if (!inline_announced) {
+					DailyPlayTime_clientAnnounceInline();
+					atexit(DailyPlayTime_clientWithdrawInline);
+					inline_announced = 1;
+				}
+				if (DailyPlayTime_clientTakeDue(playtime_message, sizeof(playtime_message)))
+					Notification_push(NOTIFICATION_PLAY_TIME, playtime_message, NULL);
+			}
 		}
 		if (daily_active) {
-			// The system toast covers libretro AND ports; don't show a second,
-			// per-game reminder here. Keep the fallback clock paused as well.
+			// The daily helper owns the clock (libretro AND ports). Don't run a
+			// second, per-game reminder here. Keep the fallback clock paused too.
 			PlayTimeTracker_resume(&playtime_tracker, notification_now);
 		} else if (PlayTimeTracker_update(&playtime_tracker, notification_now,
 				CFG_getPlayTimeReminderEnabled(), CFG_getPlayTimeRepeatMinutes(),
