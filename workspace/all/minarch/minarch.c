@@ -452,6 +452,12 @@ int main(int argc, char* argv[]) {
 		if (!daily_checked_at || notification_now - daily_checked_at >= 1000) {
 			daily_active = DailyPlayTime_clientActive();
 			daily_checked_at = notification_now;
+			static int daily_state_logged = -1;
+			if (daily_state_logged != daily_active) {
+				LOG_info("daily play-time helper active=%d (NX_PLAYTIME_PID=%s)\n", daily_active,
+					getenv("NX_PLAYTIME_PID") ? getenv("NX_PLAYTIME_PID") : "unset");
+				daily_state_logged = daily_active;
+			}
 			if (daily_active) {
 				// Register once so the daily helper hands its reminder to us and
 				// it appears in NX Redux's own in-game style, not the system toast.
@@ -460,9 +466,12 @@ int main(int argc, char* argv[]) {
 					DailyPlayTime_clientAnnounceInline();
 					atexit(DailyPlayTime_clientWithdrawInline);
 					inline_announced = 1;
+					LOG_info("daily play-time: registered as in-game reminder client (pid %d)\n", (int)getpid());
 				}
-				if (DailyPlayTime_clientTakeDue(playtime_message, sizeof(playtime_message)))
+				if (DailyPlayTime_clientTakeDue(playtime_message, sizeof(playtime_message))) {
+					LOG_info("daily play-time: showing reminder \"%s\"\n", playtime_message);
 					Notification_push(NOTIFICATION_PLAY_TIME, playtime_message, NULL);
+				}
 			}
 		}
 		if (daily_active) {
