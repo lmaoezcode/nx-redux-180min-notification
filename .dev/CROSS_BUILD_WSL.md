@@ -58,6 +58,23 @@ aarch64-linux-gnu-gcc daily.c playtimed.c -std=gnu99 -O2 -Wall -Wextra -Werror -
 Check the result: `readelf -h x.elf` must say `AArch64` / `EXEC` and
 `readelf -d x.elf | grep -c NEEDED` must print `0`.
 
+Also check the kernel ABI the static binary demands:
+
+```sh
+readelf -n x.elf | grep -A1 'ABI tag'     # must say "ABI: 3.7.0" (or lower than the device kernel)
+```
+
+**Do not build `nx_usb_guard.elf` or `playtimed.elf` with the Docker toolchain
+(`ghcr.io/loveretro/tg5040-toolchain`) using `-static`.** Its glibc is built for
+Linux 4.19+ (`file` says "for GNU/Linux 4.19.0"), and a static binary carries that
+requirement with it: on the Brick Pro's older kernel it aborts at start with
+`FATAL: kernel too old`. `nx_usb_mode.sh` then fails closed ("MTP did not stop. USB
+Storage cancelled."), so nothing is exported, but USB Storage does not work. The
+dynamically linked binaries the Docker build produces (`minarch`, `nextui`,
+`settings`, ...) are fine because they run on the device's own glibc. Build the two
+static helpers with the WSL/`aarch64-linux-gnu-gcc` commands above and verify with
+`qemu-aarch64 nx_usb_guard.elf --selftest`.
+
 ## 4. Test the aarch64 binaries on the PC
 
 ```sh
