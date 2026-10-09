@@ -10,7 +10,9 @@ DIR="$2"
 MARK="$SRC/.patched-all"
 PATCHES=""
 [ -d "$DIR" ] && PATCHES=$(ls "$DIR"/*.patch 2>/dev/null | sort) || true
-WANT=$(cat /dev/null $PATCHES | cksum | cut -d' ' -f1-2)
+# The checksum skips each patch's leading "# license:" line, so adding or
+# rewording it doesn't invalidate an already-patched checkout.
+WANT=$(cat /dev/null $PATCHES | grep -v '^# license: ' | cksum | cut -d' ' -f1-2)
 if [ -f "$MARK" ]; then
 	HAVE=$(cat "$MARK")
 	if [ -z "$HAVE" ] || [ "$HAVE" = "$WANT" ]; then

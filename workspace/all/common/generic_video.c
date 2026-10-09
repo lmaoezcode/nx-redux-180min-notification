@@ -28,6 +28,8 @@
 #include <sys/mman.h>
 #include <sys/file.h>
 
+static void bandShadowInvalidate(void);
+
 
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -117,6 +119,7 @@ static struct VID_Context {
 	int pitch;
 	int sharpness;
 } vid;
+static bool screen_premult = false; // the screen texture composites with the premultiplied blend (PLAT_setScreenDim)
 
 // libretro GPU-render (hardware core) support. The core draws into hwr.fbo on
 // the game context; each frame is blitted (flipped upright) into copy_tex,
@@ -270,6 +273,14 @@ void PLAT_HWR_setFrame(unsigned w, unsigned h, int flip) {
 		glBlitFramebuffer(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	else
 		glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	// Opaque, like CPU frames: the core's alpha channel is not coverage (PPSSPP
+	// leaves 0 on 2D screens) and the Brick's display layer composites the window
+	// with per-pixel alpha, so alpha-0 pixels would come out black.
+	glBindFramebuffer(GL_FRAMEBUFFER, hwr.copy_fbo);
+	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	hwr.frame_ready = 1;
 }
@@ -346,7 +357,7 @@ int PLAT_HWR_readAverage(void* rgba, int w, int h) {
 	if (!hwr.avg_fbo) {
 		glGenTextures(1, &hwr.avg_tex);
 		glBindTexture(GL_TEXTURE_2D, hwr.avg_tex);
-		// levels 0..level (glTexStorage2D is GL 4.2; the desktop build is GL 4.1)
+		// levels 0..level, allocated one glTexImage2D per mip
 		for (int l = 0; l <= level; l++)
 			glTexImage2D(GL_TEXTURE_2D, l, GL_RGBA, HWR_AVG_BASE >> l, HWR_AVG_BASE >> l, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, level);
@@ -876,13 +887,11 @@ SDL_Surface* PLAT_initVideo(void) {
 		vid.renderer = SDL_CreateRenderer(vid.window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 	}
 	if (!vid.renderer) {
-		// v1.9.0's AppImage died right here on every Mesa >= 25 host: the
-		// bundled libstdc++ shadowed the driver's, no GLX visual/context could
-		// be had, and the NULL window/renderer got used regardless (issue #86).
-		// Say why, then bring the UI up on a plain window + software renderer
-		// (what that issue's SDL_VIDEO_X11_VISUALID= / SDL_RENDER_DRIVER=software
-		// workaround did by hand), so a broken GL stack is a logged fact rather
-		// than a silent crash: the menu and the non-shader game path still work.
+		// A broken GL stack used to leave a NULL window/renderer that got used
+		// regardless (issue #86). Say why, then bring the UI up on a plain
+		// window + software renderer, so a broken GL stack is a logged fact
+		// rather than a silent crash: the menu and the non-shader game path
+		// still work.
 		LOG_error("%s failed: %s -- falling back to software rendering\n", vid.window ? "SDL_CreateRenderer" : "SDL_CreateWindow", SDL_GetError());
 		if (vid.window) {
 			SDL_DestroyWindow(vid.window);
@@ -909,15 +918,9 @@ SDL_Surface* PLAT_initVideo(void) {
 		LOG_info("- %s\n", SDL_GetPixelFormatName(info.texture_formats[i]));
 	}
 
-	if (strcmp("Desktop", PLAT_getModel()) == 0) {
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-	} else {
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-	}
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 
 	vid.gl_context = SDL_GL_CreateContext(vid.window);
 	if (!vid.gl_context) {
@@ -930,6 +933,7 @@ SDL_Surface* PLAT_initVideo(void) {
 	}
 
 	vid.stream_layer1 = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+	bandShadowInvalidate(); // the texture no longer matches the bars' last copies
 	vid.target_layer1 = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
 	vid.target_layer2 = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
 	vid.target_layer3 = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
@@ -949,7 +953,8 @@ SDL_Surface* PLAT_initVideo(void) {
 	SDL_BlendMode premultiplied = SDL_ComposeCustomBlendMode(
 		SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
 		SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
-	if (SDL_SetTextureBlendMode(vid.stream_layer1, premultiplied) != 0) {
+	screen_premult = SDL_SetTextureBlendMode(vid.stream_layer1, premultiplied) == 0;
+	if (!screen_premult) {
 		LOG_info("premultiplied UI blend unsupported (%s), using SDL_BLENDMODE_BLEND\n", SDL_GetError());
 		SDL_SetTextureBlendMode(vid.stream_layer1, SDL_BLENDMODE_BLEND);
 	}
@@ -1082,6 +1087,7 @@ void PLAT_setShaders(int nr) {
 static void clearVideo(void) {
 	SDL_FillRect(vid.screen, NULL, SDL_transparentBlack);
 	SDL_UpdateTexture(vid.stream_layer1, NULL, vid.screen->pixels, vid.screen->pitch);
+	bandShadowInvalidate(); // the texture no longer matches the bars' last copies
 	SDL_SetRenderTarget(vid.renderer, NULL);
 	SDL_SetRenderDrawColor(vid.renderer, 0, 0, 0, 255);
 	for (int i = 0; i < 3; i++) {
@@ -1244,7 +1250,9 @@ static void resizeVideo(int w, int h, int p) {
 
 	// SDL_SetHintWithPriority(SDL_HINT_RENDER_SCALE_QUALITY, vid.sharpness==SHARPNESS_SOFT?"1":"0", SDL_HINT_OVERRIDE);
 	vid.stream_layer1 = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+	bandShadowInvalidate(); // the texture no longer matches the bars' last copies
 	SDL_SetTextureBlendMode(vid.stream_layer1, SDL_BLENDMODE_BLEND);
+	screen_premult = false;
 
 	if (vid.sharpness == SHARPNESS_CRISP) {
 		// SDL_SetHintWithPriority(SDL_HINT_RENDER_SCALE_QUALITY, "1", SDL_HINT_OVERRIDE);
@@ -1442,15 +1450,528 @@ void PLAT_setOverlay(const char* filename, const char* tag) {
 // Every site that renders INTO a layer texture must mark it below; start true
 // (textures begin with undefined content until the first clear).
 static bool layer_has_content[6] = {true, true, true, true, true, true};
+// Per-layer write count: bumped by every clear of a layer with content and every draw onto it, so a caller that
+// uploads a layer can tell whether anything else has touched it since (PLAT_layerSerial).
+static unsigned layer_serial[6];
+
+unsigned PLAT_layerSerial(int layer) {
+	return layer >= 1 && layer <= 5 ? layer_serial[layer] : 0;
+}
+
+// The background layer's art (PLAT_setLayerArt): a caller-owned texture blended over layer 1 as part of it, so anything
+// that clears or draws on layer 1 drops it too (the caller sets it again with the layer it rebuilds).
+static SDL_Texture* layer1_art = NULL;
+static SDL_Rect layer1_art_dst;
+
+static void layerTouched(int layer) {
+	if (layer < 1 || layer > 5)
+		return;
+	layer_serial[layer]++;
+	if (layer == 1)
+		layer1_art = NULL;
+}
+
+void PLAT_setLayerArt(SDL_Texture* tex, const SDL_Rect* dst) {
+	layer1_art = tex && dst ? tex : NULL;
+	if (layer1_art)
+		layer1_art_dst = *dst;
+}
 
 // Composite the UI layers into the backbuffer, skipping layers known to be
 // empty. The stream layer (the app's software screen) is always copied.
+// ---- GPU sprites (api.h) ----
+// Two lists: the sprites over the screen layer, and the few under it (a Backdrop game list's full-screen picture,
+// which then shows through the screen's transparent body). Both are cleared together by PLAT_spritesClear.
+#define MAX_SPRITES 128
+#define MAX_UNDER_SPRITES 8
+typedef struct {
+	SDL_Texture* tex;
+	SDL_Rect src, dst, clip;
+	bool has_src, has_clip;
+	bool opaque; // PLAT_spriteAddUnderOpaque: drawn without blending, covering what is under it
+	Uint8 alpha;
+	Uint8 shade; // a grey colour mod (PLAT_spriteAddShaded): 255 = the texture's own colours
+} Sprite;
+static Sprite sprites[MAX_SPRITES];
+static int sprite_count = 0;
+static Sprite under_sprites[MAX_UNDER_SPRITES];
+static int under_count = 0;
+
+void PLAT_spritesClear(void) {
+	sprite_count = 0;
+	under_count = 0;
+}
+
+static void spriteAddTo(Sprite* list, int* count, int max, SDL_Texture* tex, const SDL_Rect* src, const SDL_Rect* dst,
+						Uint8 alpha, const SDL_Rect* clip) {
+	if (!tex || !dst || alpha == 0 || *count >= max)
+		return;
+	Sprite* s = &list[(*count)++];
+	s->tex = tex;
+	s->has_src = src != NULL;
+	if (src)
+		s->src = *src;
+	s->dst = *dst;
+	s->has_clip = clip != NULL;
+	if (clip)
+		s->clip = *clip;
+	s->opaque = false;
+	s->alpha = alpha;
+	s->shade = 255;
+}
+
+void PLAT_spriteAdd(SDL_Texture* tex, const SDL_Rect* src, const SDL_Rect* dst, Uint8 alpha, const SDL_Rect* clip) {
+	spriteAddTo(sprites, &sprite_count, MAX_SPRITES, tex, src, dst, alpha, clip);
+}
+
+void PLAT_spriteAddShaded(SDL_Texture* tex, const SDL_Rect* src, const SDL_Rect* dst, Uint8 alpha, Uint8 shade,
+						  const SDL_Rect* clip) {
+	int n = sprite_count;
+	spriteAddTo(sprites, &sprite_count, MAX_SPRITES, tex, src, dst, alpha, clip);
+	if (sprite_count > n)
+		sprites[n].shade = shade;
+}
+
+void PLAT_spriteAddUnder(SDL_Texture* tex, const SDL_Rect* src, const SDL_Rect* dst, Uint8 alpha,
+						 const SDL_Rect* clip) {
+	spriteAddTo(under_sprites, &under_count, MAX_UNDER_SPRITES, tex, src, dst, alpha, clip);
+}
+
+void PLAT_spriteAddUnderOpaque(SDL_Texture* tex, const SDL_Rect* dst) {
+	int n = under_count;
+	spriteAddTo(under_sprites, &under_count, MAX_UNDER_SPRITES, tex, NULL, dst, 255, NULL);
+	if (under_count > n)
+		under_sprites[n].opaque = true;
+}
+
+// A texture about to be destroyed leaves both lists: they are drawn again by every composite until the next clear
+// (an idle flip between frames included), and a cache may evict a surface after its sprite was added.
+static void spritesForget(SDL_Texture* t) {
+	int n = 0;
+	for (int i = 0; i < sprite_count; i++)
+		if (sprites[i].tex != t)
+			sprites[n++] = sprites[i];
+	sprite_count = n;
+	n = 0;
+	for (int i = 0; i < under_count; i++)
+		if (under_sprites[i].tex != t)
+			under_sprites[n++] = under_sprites[i];
+	under_count = n;
+}
+
+void PLAT_spriteRemove(SDL_Texture* tex) {
+	if (tex)
+		spritesForget(tex);
+}
+
+SDL_Texture* PLAT_textureForSurface(SDL_Surface* s) {
+	if (!s || !vid.renderer)
+		return NULL;
+	if (s->userdata)
+		return (SDL_Texture*)s->userdata;
+	SDL_Texture* t = SDL_CreateTextureFromSurface(vid.renderer, s);
+	if (!t)
+		return NULL;
+	SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+	s->userdata = t;
+	return t;
+}
+
+void PLAT_freeSurfaceTexture(SDL_Surface* s) {
+	if (s && s->userdata) {
+		spritesForget((SDL_Texture*)s->userdata);
+		SDL_DestroyTexture((SDL_Texture*)s->userdata);
+		s->userdata = NULL;
+	}
+}
+
+SDL_Texture* PLAT_textureFromSurface(SDL_Surface* s) {
+	if (!s || !vid.renderer)
+		return NULL;
+	SDL_Texture* t = SDL_CreateTextureFromSurface(vid.renderer, s);
+	if (t)
+		SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+	return t;
+}
+
+SDL_Texture* PLAT_textureCreate(int w, int h) {
+	if (w <= 0 || h <= 0 || !vid.renderer)
+		return NULL;
+	SDL_Texture* t = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+	if (t)
+		SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+	return t;
+}
+
+void PLAT_textureUpdateRows(SDL_Texture* t, SDL_Surface* s, int y, int h) {
+	if (!t || !s || s->format->format != SDL_PIXELFORMAT_ARGB8888)
+		return;
+	if (y < 0)
+		h += y, y = 0;
+	if (y + h > s->h)
+		h = s->h - y;
+	if (h <= 0)
+		return;
+	SDL_UpdateTexture(t, &(SDL_Rect){0, y, s->w, h}, (const Uint8*)s->pixels + y * s->pitch, s->pitch);
+}
+
+SDL_Texture* PLAT_targetCreate(int w, int h) {
+	if (w <= 0 || h <= 0 || !vid.renderer)
+		return NULL;
+	SDL_Texture* t = SDL_CreateTexture(vid.renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
+	if (t)
+		SDL_SetTextureBlendMode(t, SDL_BLENDMODE_NONE); // opaque: begun as black, drawn into with blending
+	return t;
+}
+
+void PLAT_targetBegin(SDL_Texture* t) {
+	if (!t || !vid.renderer)
+		return;
+	SDL_SetRenderTarget(vid.renderer, t);
+	SDL_SetRenderDrawColor(vid.renderer, 0, 0, 0, 255);
+	SDL_RenderClear(vid.renderer);
+}
+
+void PLAT_targetDraw(SDL_Texture* tex, const SDL_Rect* dst, Uint8 alpha) {
+	if (!tex || !vid.renderer || alpha == 0)
+		return;
+	SDL_BlendMode bm;
+	SDL_GetTextureBlendMode(tex, &bm);
+	SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+	SDL_SetTextureAlphaMod(tex, alpha);
+	SDL_RenderCopy(vid.renderer, tex, NULL, dst);
+	SDL_SetTextureBlendMode(tex, bm);
+}
+
+void PLAT_targetEnd(void) {
+	if (vid.renderer)
+		SDL_SetRenderTarget(vid.renderer, NULL);
+}
+
+void PLAT_freeTexture(SDL_Texture* t) {
+	if (!t)
+		return;
+	spritesForget(t);
+	if (t == layer1_art)
+		layer1_art = NULL;
+	SDL_DestroyTexture(t);
+}
+
+void PLAT_textureRefresh(SDL_Surface* s) {
+	if (s && s->userdata)
+		SDL_UpdateTexture((SDL_Texture*)s->userdata, NULL, s->pixels, s->pitch);
+}
+
+// screen px to output px (the window is the screen's size on our devices: 1, but kept exact if it is not)
+static void drawSpriteList(const Sprite* list, int count) {
+	if (count == 0 || !vid.screen)
+		return;
+	int ow = 0, oh = 0;
+	SDL_GetRendererOutputSize(vid.renderer, &ow, &oh);
+	float sx = vid.screen->w > 0 ? (float)ow / vid.screen->w : 1.0f;
+	float sy = vid.screen->h > 0 ? (float)oh / vid.screen->h : 1.0f;
+	bool unit = ow == vid.screen->w && oh == vid.screen->h;
+	for (int i = 0; i < count; i++) {
+		const Sprite* s = &list[i];
+		SDL_Rect d = s->dst, c = s->clip;
+		if (!unit) {
+			d = (SDL_Rect){(int)(d.x * sx), (int)(d.y * sy), (int)(d.w * sx + 0.5f), (int)(d.h * sy + 0.5f)};
+			c = (SDL_Rect){(int)(c.x * sx), (int)(c.y * sy), (int)(c.w * sx + 0.5f), (int)(c.h * sy + 0.5f)};
+		}
+		SDL_RenderSetClipRect(vid.renderer, s->has_clip ? &c : NULL);
+		SDL_SetTextureAlphaMod(s->tex, s->alpha);
+		SDL_BlendMode bm = SDL_BLENDMODE_BLEND;
+		if (s->opaque) {
+			SDL_GetTextureBlendMode(s->tex, &bm);
+			SDL_SetTextureBlendMode(s->tex, SDL_BLENDMODE_NONE);
+		}
+		if (s->shade != 255)
+			SDL_SetTextureColorMod(s->tex, s->shade, s->shade, s->shade);
+		SDL_RenderCopy(vid.renderer, s->tex, s->has_src ? &s->src : NULL, &d);
+		if (s->shade != 255)
+			SDL_SetTextureColorMod(s->tex, 255, 255, 255);
+		if (s->opaque)
+			SDL_SetTextureBlendMode(s->tex, bm);
+	}
+	SDL_RenderSetClipRect(vid.renderer, NULL);
+}
+
+#define UPLOAD_BANDS 4
+static int upload_band_y[UPLOAD_BANDS], upload_band_h[UPLOAD_BANDS];
+static int upload_band_n = 0;
+
+void PLAT_setUploadBands(const int* y, const int* h, int n) {
+	if (n > UPLOAD_BANDS)
+		n = UPLOAD_BANDS;
+	upload_band_n = n > 0 && y && h ? n : 0;
+	for (int i = 0; i < upload_band_n; i++)
+		upload_band_y[i] = y[i], upload_band_h[i] = h[i];
+}
+
+// The band rows as last uploaded (a copy per band), so a band whose pixels didn't change since (the bars, through a
+// slide) isn't uploaded again. Invalid after a whole-screen upload, which doesn't keep a copy.
+static Uint8* band_shadow[UPLOAD_BANDS];
+static size_t band_shadow_size[UPLOAD_BANDS];
+static int band_shadow_y[UPLOAD_BANDS] = {-1, -1, -1, -1}, band_shadow_h[UPLOAD_BANDS];
+
+// A hash per screen row as the texture last got it, so a whole-screen flip uploads only the rows that changed since (a
+// List step: the pill's rows and the text it moves over, not the 3 MB screen, ~10 ms on the Brick). A hash, not a
+// copy: the screen is read once (no second 3 MB read, no copy back), which is what keeps the check cheaper than the
+// upload it saves. Invalid after anything else writes the texture (the bands, a core's frame, a resize).
+static Uint64* row_hash = NULL;
+static int row_hash_n = 0;
+static bool screen_shadow_valid = false;
+
+static void bandShadowInvalidate(void) {
+	for (int b = 0; b < UPLOAD_BANDS; b++)
+		band_shadow_y[b] = -1;
+	screen_shadow_valid = false;
+}
+
+// 64-bit FNV-1a over a row's 8-byte words in four interleaved lanes (independent multiply chains the core overlaps, so
+// the hash keeps up with the memory reads), folded at the end: a changed pixel changes it, except with odds of about
+// 2^-64.
+static inline Uint64 rowHash(const Uint8* row, int bytes) {
+	const Uint64 P = 0x100000001b3ULL;
+	Uint64 a = 0xcbf29ce484222325ULL, b = a ^ 1, c = a ^ 2, d = a ^ 3;
+	int n = bytes / 32;
+	for (int i = 0; i < n; i++) {
+		Uint64 w[4];
+		memcpy(w, row + i * 32, 32); // aligned loads, no aliasing through the pixel type
+		a = (a ^ w[0]) * P;
+		b = (b ^ w[1]) * P;
+		c = (c ^ w[2]) * P;
+		d = (d ^ w[3]) * P;
+	}
+	for (int i = n * 32; i + 8 <= bytes; i += 8) { // a width not a multiple of 8 px
+		Uint64 w;
+		memcpy(&w, row + i, 8);
+		a = (a ^ w) * P;
+	}
+	return (((a * P) ^ b) * P ^ c) * P ^ d;
+}
+
+// A whole-screen upload of only the rows whose hash changed (runs of them, a few rows of gap merged in so a pill's two
+// edges go as one update). Falls back to one whole upload when the hashes aren't valid.
+// Every DIFF_SAMPLE_STEP-th row is hashed first: when most of those changed (a Home or Grid scroll, a transition, the
+// Game Switcher, minarch's menus), so did most of the screen, and the rest isn't read: one whole upload, with only the
+// sampled rows' hashes kept current (row_hash_partial). Such frames then cost an eighth of the hashing, and the first
+// frame after them that changes little uploads the whole screen once more and hashes the rows left stale.
+#define DIFF_MERGE_ROWS 8
+#define DIFF_SAMPLE_STEP 8
+static bool row_hash_partial = false; // only the sampled rows' hashes are current
+static void uploadChangedRows(void) {
+	SDL_Surface* s = vid.screen;
+	int row_bytes = s->w * 4;
+	if (row_hash_n != s->h) {
+		free(row_hash);
+		row_hash = malloc(sizeof(Uint64) * s->h);
+		row_hash_n = row_hash ? s->h : 0;
+		screen_shadow_valid = false;
+	}
+	if (!screen_shadow_valid || !row_hash) {
+		SDL_UpdateTexture(vid.stream_layer1, NULL, s->pixels, s->pitch);
+		for (int b = 0; b < UPLOAD_BANDS; b++)
+			band_shadow_y[b] = -1;
+		if (row_hash) {
+			for (int y = 0; y < s->h; y++)
+				row_hash[y] = rowHash((const Uint8*)s->pixels + y * s->pitch, row_bytes);
+			screen_shadow_valid = true;
+			row_hash_partial = false;
+		}
+		return;
+	}
+	// the sampled rows' hashes (stored below, reused by the diff so no row is hashed twice)
+	int samples = (s->h + DIFF_SAMPLE_STEP - 1) / DIFF_SAMPLE_STEP, sampled_changed = 0;
+	Uint64 sample[samples];
+	for (int i = 0; i < samples; i++) {
+		int y = i * DIFF_SAMPLE_STEP;
+		sample[i] = rowHash((const Uint8*)s->pixels + y * s->pitch, row_bytes);
+		sampled_changed += sample[i] != row_hash[y];
+	}
+	if (sampled_changed * 2 > samples || row_hash_partial) {
+		// most of the screen changed (or the rows between the samples are stale): all of it goes up
+		SDL_UpdateTexture(vid.stream_layer1, NULL, s->pixels, s->pitch);
+		for (int b = 0; b < UPLOAD_BANDS; b++)
+			band_shadow_y[b] = -1;
+		for (int i = 0; i < samples; i++)
+			row_hash[i * DIFF_SAMPLE_STEP] = sample[i];
+		row_hash_partial = sampled_changed * 2 > samples;
+		if (!row_hash_partial) // little changed: the stale rows hashed now, so the next frame diffs again
+			for (int y = 0; y < s->h; y++)
+				if (y % DIFF_SAMPLE_STEP)
+					row_hash[y] = rowHash((const Uint8*)s->pixels + y * s->pitch, row_bytes);
+		return;
+	}
+	int run_start = -1, last_changed = -1;
+	for (int y = 0; y <= s->h; y++) {
+		bool changed = false;
+		if (y < s->h) {
+			Uint64 h = y % DIFF_SAMPLE_STEP ? rowHash((const Uint8*)s->pixels + y * s->pitch, row_bytes)
+											: sample[y / DIFF_SAMPLE_STEP];
+			changed = h != row_hash[y];
+			row_hash[y] = h;
+		}
+		if (changed) {
+			if (run_start < 0)
+				run_start = y;
+			last_changed = y;
+			continue;
+		}
+		// a run ends once the gap since its last changed row is too wide to merge (or at the bottom)
+		if (run_start >= 0 && (y == s->h || y - last_changed > DIFF_MERGE_ROWS)) {
+			int h = last_changed + 1 - run_start;
+			const Uint8* rows = (const Uint8*)s->pixels + run_start * s->pitch;
+			SDL_UpdateTexture(vid.stream_layer1, &(SDL_Rect){0, run_start, s->w, h}, rows, s->pitch);
+			run_start = -1;
+		}
+	}
+	for (int b = 0; b < UPLOAD_BANDS; b++)
+		band_shadow_y[b] = -1; // the bands' copies may be stale now
+}
+
+// The screen into its texture: all of it, or just the bands set for this flip that changed (the screen's size kept).
+static void uploadScreen(bool size_kept) {
+	int n = upload_band_n;
+	upload_band_n = 0;
+	if (!size_kept) {
+		SDL_UpdateTexture(vid.stream_layer1, NULL, vid.screen->pixels, vid.screen->pitch);
+		bandShadowInvalidate();
+		return;
+	}
+	if (n <= 0) {
+		uploadChangedRows();
+		return;
+	}
+	screen_shadow_valid = false; // the bands go up from their own copies below
+	for (int i = 0; i < n; i++) {
+		int y = upload_band_y[i], h = upload_band_h[i];
+		if (y < 0)
+			h += y, y = 0;
+		if (y + h > vid.screen->h)
+			h = vid.screen->h - y;
+		if (h <= 0)
+			continue;
+		const Uint8* rows = (const Uint8*)vid.screen->pixels + y * vid.screen->pitch;
+		size_t bytes = (size_t)h * vid.screen->pitch;
+		if (band_shadow_y[i] == y && band_shadow_h[i] == h && band_shadow[i] && memcmp(band_shadow[i], rows, bytes) == 0)
+			continue; // what the texture already holds
+		SDL_Rect r = {0, y, vid.screen->w, h};
+		SDL_UpdateTexture(vid.stream_layer1, &r, rows, vid.screen->pitch);
+		if (band_shadow_size[i] < bytes) {
+			free(band_shadow[i]);
+			band_shadow[i] = malloc(bytes);
+			band_shadow_size[i] = band_shadow[i] ? bytes : 0;
+		}
+		if (band_shadow[i]) {
+			memcpy(band_shadow[i], rows, bytes);
+			band_shadow_y[i] = y, band_shadow_h[i] = h;
+		} else {
+			band_shadow_y[i] = -1;
+		}
+	}
+}
+
+// A band of the screen texture's rows drawn at opacity dim_a (PLAT_setScreenDim): kept for every composite until set
+// again. Only with the premultiplied screen blend, where a colour and alpha mod of a is the layer at true opacity.
+static int dim_y = 0, dim_h = 0;
+static Uint8 dim_a = 255;
+
+bool PLAT_setScreenDim(int y, int h, Uint8 a) {
+	if (a >= 255 || h <= 0 || !screen_premult) {
+		dim_a = 255, dim_h = 0;
+		return a >= 255 || h <= 0;
+	}
+	dim_y = y, dim_h = h, dim_a = a;
+	return true;
+}
+
+// Rows [y, y + h) of the screen texture, the dim band's at its opacity
+static void drawScreenRows(int y, int h, int ow, float sy) {
+	if (y < 0)
+		h += y, y = 0;
+	if (vid.screen && y + h > vid.screen->h)
+		h = vid.screen->h - y;
+	if (h <= 0 || !vid.screen)
+		return;
+	int cut[4] = {y, y + h, y + h, y + h}; // before the band, the band, after it
+	if (dim_a < 255 && dim_h > 0) {
+		int b0 = dim_y < y ? y : (dim_y > y + h ? y + h : dim_y);
+		int b1 = dim_y + dim_h < b0 ? b0 : (dim_y + dim_h > y + h ? y + h : dim_y + dim_h);
+		cut[1] = b0, cut[2] = b1;
+	}
+	for (int k = 0; k < 3; k++) {
+		int py = cut[k], ph = cut[k + 1] - cut[k];
+		if (ph <= 0)
+			continue;
+		bool dimmed = k == 1 && dim_a < 255;
+		if (dimmed) {
+			SDL_SetTextureColorMod(vid.stream_layer1, dim_a, dim_a, dim_a);
+			SDL_SetTextureAlphaMod(vid.stream_layer1, dim_a);
+		}
+		SDL_Rect src = {0, py, vid.screen->w, ph};
+		SDL_Rect dst = {0, (int)(py * sy), ow, (int)(ph * sy + 0.5f)};
+		SDL_RenderCopy(vid.renderer, vid.stream_layer1, &src, &dst);
+		if (dimmed) {
+			SDL_SetTextureColorMod(vid.stream_layer1, 255, 255, 255);
+			SDL_SetTextureAlphaMod(vid.stream_layer1, 255);
+		}
+	}
+}
+
+// The rows of the screen texture the next composite draws (PLAT_setScreenDrawBands): consumed by it, 0 = all of it.
+static int draw_band_y[2], draw_band_h[2];
+static int draw_band_n = 0;
+
+void PLAT_setScreenDrawBands(const int* y, const int* h, int n) {
+	if (n > 2)
+		n = 2;
+	draw_band_n = n > 0 && y && h ? n : 0;
+	for (int i = 0; i < draw_band_n; i++)
+		draw_band_y[i] = y[i], draw_band_h[i] = h[i];
+}
+
+// The last opaque under-sprite covering the whole screen (PLAT_spriteAddUnderOpaque), or -1: it and what is over it
+// are all that shows of the bottom of the stack.
+static int coveringUnder(void) {
+	if (!vid.screen)
+		return -1;
+	for (int i = under_count - 1; i >= 0; i--) {
+		const Sprite* s = &under_sprites[i];
+		if (s->opaque && !s->has_clip && s->dst.x <= 0 && s->dst.y <= 0 && s->dst.x + s->dst.w >= vid.screen->w &&
+			s->dst.y + s->dst.h >= vid.screen->h)
+			return i;
+	}
+	return -1;
+}
+
 static void compositeLayers(void) {
-	if (layer_has_content[1])
-		SDL_RenderCopy(vid.renderer, vid.target_layer1, NULL, NULL);
-	if (layer_has_content[2])
-		SDL_RenderCopy(vid.renderer, vid.target_layer2, NULL, NULL);
-	SDL_RenderCopy(vid.renderer, vid.stream_layer1, NULL, NULL);
+	int bands = draw_band_n;
+	draw_band_n = 0;
+	int cover = coveringUnder();
+	if (cover < 0) {
+		if (layer_has_content[1])
+			SDL_RenderCopy(vid.renderer, vid.target_layer1, NULL, NULL);
+		if (layer1_art) // part of layer 1 (PLAT_setLayerArt)
+			SDL_RenderCopy(vid.renderer, layer1_art, NULL, &layer1_art_dst);
+		if (layer_has_content[2])
+			SDL_RenderCopy(vid.renderer, vid.target_layer2, NULL, NULL);
+	}
+	// under the screen: seen through its transparent body (from the covering one up, when there is one)
+	drawSpriteList(under_sprites + (cover > 0 ? cover : 0), under_count - (cover > 0 ? cover : 0));
+	if ((bands > 0 || (dim_a < 255 && dim_h > 0)) && vid.screen) {
+		int ow = 0, oh = 0;
+		SDL_GetRendererOutputSize(vid.renderer, &ow, &oh);
+		float sy = vid.screen->h > 0 ? (float)oh / vid.screen->h : 1.0f;
+		if (bands > 0)
+			for (int i = 0; i < bands; i++)
+				drawScreenRows(draw_band_y[i], draw_band_h[i], ow, sy);
+		else
+			drawScreenRows(0, vid.screen->h, ow, sy);
+	} else {
+		SDL_RenderCopy(vid.renderer, vid.stream_layer1, NULL, NULL);
+	}
+	drawSpriteList(sprites, sprite_count);
 	if (layer_has_content[3])
 		SDL_RenderCopy(vid.renderer, vid.target_layer3, NULL, NULL);
 	if (layer_has_content[4])
@@ -1462,37 +1983,56 @@ static void compositeLayers(void) {
 void PLAT_clearLayers(int layer) {
 	// Layers composite with per-pixel alpha ABOVE the UI stream (layers 3-5),
 	// so they must be cleared to TRANSPARENT black. RenderClear uses the
-	// renderer's current draw color, which on desktop is opaque black after
-	// every PLAT_flip (its backbuffer clear) — inheriting that here turned a
-	// cleared thumbnail/transition layer into an opaque black sheet that
-	// blacked out the whole UI the moment anything was drawn onto that layer.
+	// renderer's current draw color, which may have been left opaque by an
+	// earlier draw — inheriting that here would turn a cleared
+	// thumbnail/transition layer into an opaque black sheet.
 	SDL_SetRenderDrawColor(vid.renderer, 0, 0, 0, 0);
-	if (layer == 0 || layer == 1) {
+	if ((layer == 0 || layer == 1) && layer_has_content[1]) { // an empty layer has nothing to clear
 		SDL_SetRenderTarget(vid.renderer, vid.target_layer1);
 		SDL_RenderClear(vid.renderer);
 		layer_has_content[1] = false;
+		layerTouched(1);
 	}
-	if (layer == 0 || layer == 2) {
+	if ((layer == 0 || layer == 2) && layer_has_content[2]) { // an empty layer has nothing to clear
 		SDL_SetRenderTarget(vid.renderer, vid.target_layer2);
 		SDL_RenderClear(vid.renderer);
 		layer_has_content[2] = false;
+		layerTouched(2);
 	}
-	if (layer == 0 || layer == 3) {
+	if ((layer == 0 || layer == 3) && layer_has_content[3]) { // an empty layer has nothing to clear
 		SDL_SetRenderTarget(vid.renderer, vid.target_layer3);
 		SDL_RenderClear(vid.renderer);
 		layer_has_content[3] = false;
+		layerTouched(3);
 	}
-	if (layer == 0 || layer == 4) {
+	if ((layer == 0 || layer == 4) && layer_has_content[4]) { // an empty layer has nothing to clear
 		SDL_SetRenderTarget(vid.renderer, vid.target_layer4);
 		SDL_RenderClear(vid.renderer);
 		layer_has_content[4] = false;
+		layerTouched(4);
 	}
-	if (layer == 0 || layer == 5) {
+	if ((layer == 0 || layer == 5) && layer_has_content[5]) { // an empty layer has nothing to clear
 		SDL_SetRenderTarget(vid.renderer, vid.target_layer5);
 		SDL_RenderClear(vid.renderer);
 		layer_has_content[5] = false;
+		layerTouched(5);
 	}
 
+	SDL_SetRenderTarget(vid.renderer, NULL);
+}
+
+void PLAT_drawTextureOnLayer(SDL_Texture* tex, const SDL_Rect* dst, int layer) {
+	if (!tex || !dst || !vid.renderer)
+		return;
+	SDL_Texture* targets[6] = {NULL, vid.target_layer1, vid.target_layer2, vid.target_layer3, vid.target_layer4,
+							   vid.target_layer5};
+	int l = layer >= 1 && layer <= 5 ? layer : 1;
+	if (!targets[l])
+		return;
+	SDL_SetRenderTarget(vid.renderer, targets[l]);
+	layer_has_content[l] = true;
+	layerTouched(l);
+	SDL_RenderCopy(vid.renderer, tex, NULL, dst);
 	SDL_SetRenderTarget(vid.renderer, NULL);
 }
 
@@ -1532,6 +2072,7 @@ void PLAT_drawOnLayer(SDL_Surface* inputSurface, int x, int y, int w, int h, flo
 		break;
 	}
 	layer_has_content[(layer >= 1 && layer <= 5) ? layer : 1] = true;
+	layerTouched((layer >= 1 && layer <= 5) ? layer : 1);
 
 	// Adjust brightness
 	Uint8 r = 255, g = 255, b = 255;
@@ -1612,6 +2153,7 @@ void PLAT_animateSurface(
 		else
 			SDL_SetRenderTarget(vid.renderer, vid.target_layer4);
 		layer_has_content[layer == 0 ? 2 : 4] = true;
+		layerTouched(layer == 0 ? 2 : 4);
 
 		SDL_SetRenderDrawColor(vid.renderer, 0, 0, 0, 0);
 		SDL_RenderClear(vid.renderer);
@@ -1702,6 +2244,7 @@ void PLAT_scrollTextTexture(
 
 	SDL_SetRenderTarget(vid.renderer, vid.target_layer4);
 	layer_has_content[4] = true;
+	layerTouched(4);
 
 	// RTL: start right-aligned (show the right edge = the beginning of the
 	// Arabic) instead of the left edge, so the first frame reads correctly.
@@ -1786,6 +2329,7 @@ void PLAT_animateSurfaceOpacity(
 		return;
 	}
 	layer_has_content[layer == 0 ? 2 : 4] = true;
+	layerTouched(layer == 0 ? 2 : 4);
 
 	for (int frame = 0; frame <= total_frames; ++frame) {
 		float t = (float)frame / total_frames;
@@ -1913,6 +2457,7 @@ void PLAT_animateSlidePages(
 			break;
 		}
 		layer_has_content[(layer >= 1 && layer <= 5) ? layer : 1] = true;
+		layerTouched((layer >= 1 && layer <= 5) ? layer : 1);
 		SDL_SetRenderDrawColor(vid.renderer, 0, 0, 0, 0);
 		SDL_RenderClear(vid.renderer);
 
@@ -2277,6 +2822,7 @@ void PLAT_flipHidden() {
 	SDL_RenderClear(vid.renderer);
 	resizeVideo(device_width, device_height, FIXED_PITCH); // !!!???
 	SDL_UpdateTexture(vid.stream_layer1, NULL, vid.screen->pixels, vid.screen->pitch);
+	bandShadowInvalidate(); // the texture no longer matches the bars' last copies
 	compositeLayers();
 	//  SDL_RenderPresent(vid.renderer); // no present want to flip  hidden
 }
@@ -2286,21 +2832,10 @@ void PLAT_flip(SDL_Surface* IGNORED, int ignored) {
 	capture_check();
 	// dont think we need this here tbh
 	// SDL_RenderClear(vid.renderer);
-#if defined(HAS_RUNTIME_PATHS)
-	// Desktop's SDL_Renderer double-buffers, and the UI (nextui + every tool) is
-	// uploaded with a TRANSPARENT background (GFX_clear -> SDL_transparentBlack)
-	// and composited with BLEND (compositeLayers below). Without clearing the
-	// backbuffer each present, this frame's UI blends over the OTHER buffer's
-	// stale content, so a gliding selection pill smears into a trail of stacked
-	// pills. Clear the backbuffer to OPAQUE black first. Device presents
-	// single-buffered and kept the original no-clear path, so this compiles out
-	// there.
-	SDL_SetRenderDrawColor(vid.renderer, 0, 0, 0, 255);
-	SDL_RenderClear(vid.renderer);
-#endif
 	if (!vid.blit) {
+		int kept_w = vid.width, kept_h = vid.height;
 		resizeVideo(device_width, device_height, FIXED_PITCH); // !!!???
-		SDL_UpdateTexture(vid.stream_layer1, NULL, vid.screen->pixels, vid.screen->pitch);
+		uploadScreen(kept_w == vid.width && kept_h == vid.height);
 		compositeLayers();
 		capture_write();
 		SDL_RenderPresent(vid.renderer);
@@ -2311,15 +2846,19 @@ void PLAT_flip(SDL_Surface* IGNORED, int ignored) {
 	if (vid.width != vid.blit->true_w || vid.height != vid.blit->true_h) {
 		// Texture size doesn't match buffer, clear blit and use screen buffer instead
 		vid.blit = NULL;
+		upload_band_n = 0;
 		resizeVideo(device_width, device_height, FIXED_PITCH);
 		SDL_UpdateTexture(vid.stream_layer1, NULL, vid.screen->pixels, vid.screen->pitch);
+		bandShadowInvalidate(); // the texture no longer matches the bars' last copies
 		compositeLayers();
 		capture_write();
 		SDL_RenderPresent(vid.renderer);
 		return;
 	}
 
+	upload_band_n = 0; // a core's frame: always whole
 	SDL_UpdateTexture(vid.stream_layer1, NULL, vid.blit->src, vid.blit->src_p);
+	bandShadowInvalidate(); // the texture no longer matches the bars' last copies
 
 	SDL_Texture* target = vid.stream_layer1;
 	int x = vid.blit->src_x;
@@ -2685,21 +3224,6 @@ void PLAT_GL_Swap() {
 	}
 
 	SDL_GL_MakeCurrent(vid.window, vid.gl_context);
-
-#if defined(HAS_RUNTIME_PATHS)
-	// Desktop runs this game GL context on the SAME window as the SDL_Renderer
-	// that draws the menu/UI. The clear cadence far above runs BEFORE this
-	// MakeCurrent, so on desktop it lands on whatever context was current (the
-	// menu's SDL_Renderer GL context) and never touches the game framebuffer --
-	// which is why the last menu frame (top bar + hint bar) stays composited
-	// around the letterboxed game after the menu closes. Now that the game
-	// context is current, clear ITS default framebuffer to OPAQUE black every
-	// frame so the border is solid and nothing ghosts. Device has a single
-	// surface plus a bezel overlay, so this is desktop-only.
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-#endif
 
 	static GLuint effect_tex = 0;
 	static int effect_w = 0, effect_h = 0;

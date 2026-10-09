@@ -1,3 +1,4 @@
+# license: modifies Flycast (https://github.com/flyinghead/flycast), GPL-2.0 (LICENSE); this patch is distributed under the same license.
 diff --git a/core/hw/sh4/sh4_interrupts.cpp b/core/hw/sh4/sh4_interrupts.cpp
 index 49a3be455..40eacc928 100644
 --- a/core/hw/sh4/sh4_interrupts.cpp

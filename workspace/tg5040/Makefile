@@ -76,7 +76,7 @@ $(REQUIRES_MUPEN64PLUS)/mupen64plus-core:
 		git clone $(GLIDEN64_REPO) ../all/other/mupen64plus/GLideN64-standalone && \
 		cd ../all/other/mupen64plus/GLideN64-standalone && \
 		git checkout $(GLIDEN64_COMMIT) && git submodule update --init --recursive && \
-		git apply ../GLideN64-standalone.patch )
+		git apply --exclude='src/GLideNHQ/lib/*.a' ../GLideN64-standalone.patch )
 
 $(REQUIRES_SDL2_DRASTIC)/SDL_drastic:
 	git clone $(SDL_DRASTIC_REPO) $(REQUIRES_SDL2_DRASTIC)/SDL_drastic

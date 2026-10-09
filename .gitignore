@@ -6,7 +6,6 @@
 !skeleton/BASE/Emus/**/*.so
 !skeleton/SYSTEM/shared/lib/*.so
 *.elf
-!skeleton/SYSTEM/**/N64.pak/m64p-server.elf
 *.dtb
 *.zip
 !skeleton/BASE/Emus/shared/PortMaster/files/*
@@ -73,3 +72,11 @@ workspace/all/n64-netplay-server/tests/test_client
 workspace/all/n64-netplay-server/**/*.dSYM/
 .clangd-shim
 scripts/bench/results/**/*.log
+
+# ScreenScraper dev credentials (scripts/gen-ss-credentials.sh)
+workspace/all/scraper/ss_credentials.h
+.env
+
+# third-party prebuilts built from pinned source (workspace/all/prebuilts/*.sh)
+workspace/all/prebuilts/work
+workspace/all/prebuilts/output

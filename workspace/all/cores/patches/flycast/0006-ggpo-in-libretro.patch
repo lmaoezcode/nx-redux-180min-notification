@@ -1,3 +1,4 @@
+# license: modifies Flycast (https://github.com/flyinghead/flycast), GPL-2.0 (LICENSE); this patch is distributed under the same license.
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 19bdfee..ad51273 100644
 --- a/CMakeLists.txt

@@ -1,3 +1,4 @@
+# license: modifies Flycast (https://github.com/flyinghead/flycast), GPL-2.0 (LICENSE); this patch is distributed under the same license.
 diff --git a/shell/libretro/oslib.cpp b/shell/libretro/oslib.cpp
 index a32d109..541c312 100644
 --- a/shell/libretro/oslib.cpp

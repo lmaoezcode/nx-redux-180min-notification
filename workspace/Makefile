@@ -15,16 +15,6 @@ endif
 .PHONY: all
 
 all:
-ifeq ($(PLATFORM), desktop)
-	cd ./$(PLATFORM) && make early # eg. other libs
-	cd ./all/nextui/ && make
-	cd ./all/minarch/ && make
-	#cd ./all/libgametimedb/ && make
-	#cd ./all/gametimectl/ && make
-	#cd ./all/gametime/ && make
-	cd ./all/nextval/ && make
-	cd ./all/settings/ && make
-else
 ifeq ($(PLATFORM), tg5040)
 	cd ./$(PLATFORM)/rfkill && make all
 	cd ./$(PLATFORM)/btmanager && make all
@@ -75,9 +65,9 @@ ifneq (,$(filter $(PLATFORM),tg5040 tg5050))
 	cd ./all/osdctl/ && make
 	cd ./all/osdmusic/ && make
 	cd ./all/osdwait/ && make
+	cd ./all/n64-netplay-server/ && make
 endif
 	cd ./all/scraper/ && make
-endif
 ifdef COMPILE_CORES
 	make cores
 else
@@ -95,7 +85,6 @@ endif
 	cd ./$(PLATFORM)/cores && make $(CORE)
 
 clean:
-ifneq ($(PLATFORM), desktop)
 	cd ./$(PLATFORM)/keymon && make clean
 	cd ./$(PLATFORM)/sleepmon && make clean
 ifeq ($(PLATFORM), tg5040)
@@ -112,7 +101,6 @@ endif
 ifeq ($(PLATFORM), tg5050)
 	cd ./$(PLATFORM)/btmanager && make clean
 	cd ./$(PLATFORM)/poweroff_next/ && make clean
-endif
 endif
 	cd ./$(PLATFORM)/libmsettings && make clean
 	cd ./all/nextui/ && make clean

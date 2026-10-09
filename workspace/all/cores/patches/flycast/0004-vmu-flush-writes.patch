@@ -1,3 +1,4 @@
+# license: modifies Flycast (https://github.com/flyinghead/flycast), GPL-2.0 (LICENSE); this patch is distributed under the same license.
 diff --git a/core/hw/maple/maple_devs.cpp b/core/hw/maple/maple_devs.cpp
 index 9402444..a5424a9 100644
 --- a/core/hw/maple/maple_devs.cpp
