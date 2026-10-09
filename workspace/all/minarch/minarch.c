@@ -251,7 +251,6 @@ static void daily_playtime_pause(unsigned reason, int pause) {
 }
 
 int main(int argc, char* argv[]) {
-	PATHS_init(PLATFORM);
 	if (argc >= 4 && argc <= 5 && !strcmp(argv[1], "--dump-options"))
 		return OptsDump_run(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
 
@@ -348,6 +347,7 @@ int main(int argc, char* argv[]) {
 	// Pass ROM data if available, otherwise just path (for cores that load from file)
 	{
 		char* rom_path_for_ra = game.tmp_path[0] ? game.tmp_path : game.path;
+		RA_setRecordedRomPath(game.path);
 		RA_loadGame(rom_path_for_ra, game.data, game.size, core.tag);
 	}
 

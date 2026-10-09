@@ -18,8 +18,7 @@ typedef enum {
 	PLAT_UNKNOWN = 0,
 	PLAT_TG5040,
 	PLAT_TG5050,
-	PLAT_MY355,
-	PLAT_DESKTOP
+	PLAT_MY355
 } DevicePlatform;
 
 // ============================================
@@ -52,6 +51,7 @@ typedef struct SettingItem {
 	int (*get_value)(void);		// returns current value
 	void (*set_value)(int val); // sets value
 	int* values;				// maps idx -> actual value (NULL means idx=value)
+	int a_cycles;				// 1 = A also steps to the next value (a two-value flip row)
 
 	// ITEM_BUTTON
 	void (*on_press)(void);

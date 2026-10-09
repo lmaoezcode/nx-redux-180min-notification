@@ -96,9 +96,30 @@ static uint32_t asset_rgbs[ASSET_COLORS];
 GFX_Fonts font;
 GFX_Fonts font_ar; // secondary Arabic font (MiSans Arabic), same sizes as `font`
 
-// The Arabic-font counterpart of a primary size-font (NULL if the Arabic font
-// failed to load or `primary` isn't one of the size fonts).
+// Resolver for fonts outside `font` (common/ui/ui_font.c's runtime cache registers one).
+static TTF_Font* (*fallback_resolver)(TTF_Font* primary) = NULL;
+
+void GFX_setFallbackFontResolver(TTF_Font* (*resolver)(TTF_Font* primary)) {
+	fallback_resolver = resolver;
+}
+
+const char* GFX_getArabicFontPath(void) {
+	static char path[MAX_PATH];
+	if (!path[0])
+		snprintf(path, sizeof(path), "%s/font1-arabic.ttf", RES_PATH);
+	return path;
+}
+
+// The Arabic-font counterpart of a primary size-font, or of a font the registered resolver knows (NULL if
+// the Arabic font failed to load or `primary` is unknown).
+// The button hint bar's label font at CHROME_SCALE (the Brick's physical size, whatever the UI scale), and its
+// Arabic counterpart; opened with the other system fonts.
+static TTF_Font* hint_tiny_chrome = NULL;
+static TTF_Font* hint_tiny_chrome_ar = NULL;
+
 TTF_Font* GFX_fallbackFontFor(TTF_Font* primary) {
+	if (primary && primary == hint_tiny_chrome)
+		return hint_tiny_chrome_ar;
 	if (primary == font.xlarge)
 		return font_ar.xlarge;
 	if (primary == font.title)
@@ -113,7 +134,7 @@ TTF_Font* GFX_fallbackFontFor(TTF_Font* primary) {
 		return font_ar.tiny;
 	if (primary == font.micro)
 		return font_ar.micro;
-	return NULL;
+	return fallback_resolver ? fallback_resolver(primary) : NULL;
 }
 
 // Render UTF-8 to a NEW surface (caller frees). Non-Arabic text takes the exact
@@ -335,6 +356,17 @@ static void GFX_clearTextCache(void) {
 	text_cache_lru = 0;
 }
 
+void GFX_forgetFontText(TTF_Font* font) {
+	if (!font)
+		return;
+	for (int i = 0; i < TEXT_CACHE_SIZE; i++) {
+		if (text_cache[i].surf && text_cache[i].font == font) {
+			SDL_FreeSurface(text_cache[i].surf);
+			text_cache[i] = (TextCacheEntry){0};
+		}
+	}
+}
+
 SDL_Surface* GFX_getCachedText(TTF_Font* font, const char* text, SDL_Color color) {
 	if (!font || !text || !text[0])
 		return NULL;
@@ -376,10 +408,32 @@ SDL_Surface* GFX_getCachedText(TTF_Font* font, const char* text, SDL_Color color
 	return surf;
 }
 
+// The path GFX_loadSystemFont last opened, for runtime font caches (common/ui/ui_font.c) that open the same
+// face at other sizes; and their close hook, run before every system-font (re)load (font or scale change)
+// and in GFX_quit so they reopen at the new font/scale.
+static char system_font_path[MAX_PATH];
+static void (*font_reload_hook)(void) = NULL;
+
+const char* GFX_getSystemFontPath(void) {
+	if (!system_font_path[0])
+		snprintf(system_font_path, sizeof(system_font_path), "%s/font1.ttf", RES_PATH);
+	return system_font_path;
+}
+
+void GFX_setFontReloadHook(void (*hook)(void)) {
+	font_reload_hook = hook;
+}
+
 int GFX_loadSystemFont(const char* fontPath) {
 	// Load/Reload fonts
 	if (!TTF_WasInit())
 		TTF_Init();
+
+	// Runtime font caches close first (dropping their cached text), then reopen lazily on fontPath.
+	if (font_reload_hook)
+		font_reload_hook();
+	if (fontPath && fontPath != system_font_path)
+		snprintf(system_font_path, sizeof(system_font_path), "%s", fontPath);
 
 	// Cached text surfaces hold now-dangling font pointers; drop them all.
 	GFX_clearTextCache();
@@ -399,11 +453,14 @@ int GFX_loadSystemFont(const char* fontPath) {
 	font.small = TTF_OpenFont(fontPath, SCALE1(FONT_SMALL));
 	font.tiny = TTF_OpenFont(fontPath, SCALE1(FONT_TINY));
 	font.micro = TTF_OpenFont(fontPath, SCALE1(FONT_MICRO));
+	// the hint bar's chrome-size face is only used when CHROME_SCALE differs from the UI scale (hintTinyChrome);
+	// a scale change reloads the system fonts, so this re-decides then
+	TTF_CloseFont(hint_tiny_chrome);
+	hint_tiny_chrome = CHROME_SCALE != FIXED_SCALE ? TTF_OpenFont(fontPath, CHROME1(FONT_TINY)) : NULL;
 
 	// Secondary Arabic font (fixed path — independent of the primary UI font).
 	// Missing file => NULL entries => Arabic falls back to primary (tofu), no crash.
-	char arPath[MAX_PATH];
-	snprintf(arPath, sizeof(arPath), "%s/font1-arabic.ttf", RES_PATH);
+	const char* arPath = GFX_getArabicFontPath();
 	TTF_CloseFont(font_ar.xlarge);
 	TTF_CloseFont(font_ar.title);
 	TTF_CloseFont(font_ar.large);
@@ -418,6 +475,8 @@ int GFX_loadSystemFont(const char* fontPath) {
 	font_ar.small = TTF_OpenFont(arPath, SCALE1(FONT_SMALL));
 	font_ar.tiny = TTF_OpenFont(arPath, SCALE1(FONT_TINY));
 	font_ar.micro = TTF_OpenFont(arPath, SCALE1(FONT_MICRO));
+	TTF_CloseFont(hint_tiny_chrome_ar);
+	hint_tiny_chrome_ar = CHROME_SCALE != FIXED_SCALE ? TTF_OpenFont(arPath, CHROME1(FONT_TINY)) : NULL;
 
 	return 0;
 }
@@ -443,7 +502,7 @@ int GFX_updateColors(void) {
 // Boost the cpufreq policy the platform actually caps (platform.h CPU_FREQ_BASE):
 // on tg5050 that is the big cluster's cpu4, and cpu0's little cluster already sits
 // at its ceiling, so a hardcoded cpu0 path was a silent no-op there. Platforms
-// without a define (desktop) fall back to cpu0, where the W_OK check bails anyway.
+// without a define fall back to cpu0.
 #ifndef CPU_FREQ_BASE
 #define CPU_FREQ_BASE "/sys/devices/system/cpu/cpu0/cpufreq"
 #endif
@@ -558,55 +617,61 @@ static void GFX_resetNavGlyphs(void);
 
 // Asset-sheet source rects are in scaled pixels, so they are rebuilt whenever
 // the UI scale changes (GFX_init, GFX_reloadScale).
+// The asset sheet's rects at `scale` (FIXED_SCALE, or the hint bar's CHROME_SCALE for its baked sheet).
+static void GFX_initAssetRectsInto(SDL_Rect* rects, float scale) {
+#define AR4(a, b, c, d) (int)((a) * scale + 0.5f), (int)((b) * scale + 0.5f), (int)((c) * scale + 0.5f), (int)((d) * scale + 0.5f)
+	rects[ASSET_WHITE_PILL] = (SDL_Rect){AR4(1, 1, 30, 30)};
+	rects[ASSET_BLACK_PILL] = (SDL_Rect){AR4(33, 1, 30, 30)};
+	rects[ASSET_DARK_GRAY_PILL] = (SDL_Rect){AR4(65, 1, 30, 30)};
+	rects[ASSET_OPTION] = (SDL_Rect){AR4(97, 1, 20, 20)};
+	rects[ASSET_BUTTON] = (SDL_Rect){AR4(1, 33, 20, 20)};
+	rects[ASSET_WHITE_RECT] = (SDL_Rect){AR4(1 + 14, 1, 2, 30)};
+	rects[ASSET_BLACK_RECT] = (SDL_Rect){AR4(33 + 14, 1, 2, 30)};
+	rects[ASSET_DARK_GRAY_RECT] = (SDL_Rect){AR4(65 + 14, 1, 2, 30)};
+	rects[ASSET_OPTION_RECT] = (SDL_Rect){AR4(97 + 9, 1, 2, 20)};
+	rects[ASSET_BUTTON_RECT] = (SDL_Rect){AR4(1 + 9, 33, 2, 20)};
+	rects[ASSET_PAGE_BG] = (SDL_Rect){AR4(64, 33, 15, 15)};
+	rects[ASSET_STATE_BG] = (SDL_Rect){AR4(23, 54, 8, 8)};
+	rects[ASSET_PAGE] = (SDL_Rect){AR4(39, 54, 6, 6)};
+	rects[ASSET_BAR] = (SDL_Rect){AR4(33, 58, 4, 4)};
+	rects[ASSET_BAR_BG] = (SDL_Rect){AR4(33, 58, 4, 4)};
+	rects[ASSET_BAR_BG_MENU] = (SDL_Rect){AR4(33, 58, 4, 4)};
+	rects[ASSET_UNDERLINE] = (SDL_Rect){AR4(85, 51, 3, 3)};
+	rects[ASSET_DOT] = (SDL_Rect){AR4(33, 54, 2, 2)};
+	rects[ASSET_BRIGHTNESS] = (SDL_Rect){AR4(1, 85, 19, 19)};
+	rects[ASSET_COLORTEMP] = (SDL_Rect){AR4(41, 85, 9, 19)};
+	rects[ASSET_VOLUME_MUTE] = (SDL_Rect){AR4(21, 85, 10, 19)};
+	rects[ASSET_VOLUME] = (SDL_Rect){AR4(21, 85, 19, 19)};
+	rects[ASSET_BATTERY] = (SDL_Rect){AR4(47, 51, 17, 10)};
+	rects[ASSET_BATTERY_LOW] = (SDL_Rect){AR4(66, 51, 17, 10)};
+	rects[ASSET_BATTERY_FILL] = (SDL_Rect){AR4(81, 33, 12, 6)};
+	rects[ASSET_BATTERY_FILL_LOW] = (SDL_Rect){AR4(1, 55, 12, 6)};
+	rects[ASSET_BATTERY_BOLT] = (SDL_Rect){AR4(81, 41, 12, 6)};
+	rects[ASSET_SCROLL_UP] = (SDL_Rect){AR4(97, 23, 24, 6)};
+	rects[ASSET_SCROLL_DOWN] = (SDL_Rect){AR4(97, 31, 24, 6)};
+	rects[ASSET_WIFI] = (SDL_Rect){AR4(1, 104, 12, 12)};
+	rects[ASSET_WIFI_MED] = (SDL_Rect){AR4(14, 104, 12, 12)};
+	rects[ASSET_WIFI_LOW] = (SDL_Rect){AR4(27, 104, 12, 12)};
+	rects[ASSET_WIFI_OFF] = (SDL_Rect){AR4(40, 104, 12, 12)};
+	rects[ASSET_CHECKCIRCLE] = (SDL_Rect){AR4(1, 117, 10, 10)};
+	rects[ASSET_LOCK] = (SDL_Rect){AR4(12, 116, 8, 11)};
+	rects[ASSET_HOLE] = (SDL_Rect){AR4(1, 63, 20, 20)};
+	rects[ASSET_GAMEPAD] = (SDL_Rect){AR4(91, 51, 17, 10)};
+	rects[ASSET_SETTINGS] = (SDL_Rect){AR4(21, 117, 10, 10)};
+	rects[ASSET_STORE] = (SDL_Rect){AR4(66, 117, 10, 10)};
+	rects[ASSET_POWEROFF] = (SDL_Rect){AR4(43, 117, 10, 10)};
+	rects[ASSET_SUSPEND] = (SDL_Rect){AR4(32, 117, 10, 10)};
+	rects[ASSET_RESTART] = (SDL_Rect){AR4(54, 119, 11, 8)};
+	rects[ASSET_SCREENSHOT] = (SDL_Rect){AR4(105, 104, 12, 12)};
+	rects[ASSET_RECORD] = (SDL_Rect){AR4(78, 117, 10, 10)};
+	rects[ASSET_BLUETOOTH] = (SDL_Rect){AR4(53, 104, 12, 12)};
+	rects[ASSET_BLUETOOTH_OFF] = (SDL_Rect){AR4(66, 104, 12, 12)};
+	rects[ASSET_AUDIO] = (SDL_Rect){AR4(79, 104, 12, 12)};
+	rects[ASSET_CONTROLLER] = (SDL_Rect){AR4(92, 104, 12, 12)};
+#undef AR4
+}
 static void GFX_initAssetRects(void) {
-	asset_rects[ASSET_WHITE_PILL] = (SDL_Rect){SCALE4(1, 1, 30, 30)};
-	asset_rects[ASSET_BLACK_PILL] = (SDL_Rect){SCALE4(33, 1, 30, 30)};
-	asset_rects[ASSET_DARK_GRAY_PILL] = (SDL_Rect){SCALE4(65, 1, 30, 30)};
-	asset_rects[ASSET_OPTION] = (SDL_Rect){SCALE4(97, 1, 20, 20)};
-	asset_rects[ASSET_BUTTON] = (SDL_Rect){SCALE4(1, 33, 20, 20)};
-	asset_rects[ASSET_WHITE_RECT] = (SDL_Rect){SCALE4(1 + 14, 1, 2, 30)};
-	asset_rects[ASSET_BLACK_RECT] = (SDL_Rect){SCALE4(33 + 14, 1, 2, 30)};
-	asset_rects[ASSET_DARK_GRAY_RECT] = (SDL_Rect){SCALE4(65 + 14, 1, 2, 30)};
-	asset_rects[ASSET_OPTION_RECT] = (SDL_Rect){SCALE4(97 + 9, 1, 2, 20)};
-	asset_rects[ASSET_BUTTON_RECT] = (SDL_Rect){SCALE4(1 + 9, 33, 2, 20)};
-	asset_rects[ASSET_PAGE_BG] = (SDL_Rect){SCALE4(64, 33, 15, 15)};
-	asset_rects[ASSET_STATE_BG] = (SDL_Rect){SCALE4(23, 54, 8, 8)};
-	asset_rects[ASSET_PAGE] = (SDL_Rect){SCALE4(39, 54, 6, 6)};
-	asset_rects[ASSET_BAR] = (SDL_Rect){SCALE4(33, 58, 4, 4)};
-	asset_rects[ASSET_BAR_BG] = (SDL_Rect){SCALE4(33, 58, 4, 4)};
-	asset_rects[ASSET_BAR_BG_MENU] = (SDL_Rect){SCALE4(33, 58, 4, 4)};
-	asset_rects[ASSET_UNDERLINE] = (SDL_Rect){SCALE4(85, 51, 3, 3)};
-	asset_rects[ASSET_DOT] = (SDL_Rect){SCALE4(33, 54, 2, 2)};
-	asset_rects[ASSET_BRIGHTNESS] = (SDL_Rect){SCALE4(1, 85, 19, 19)};
-	asset_rects[ASSET_COLORTEMP] = (SDL_Rect){SCALE4(41, 85, 9, 19)};
-	asset_rects[ASSET_VOLUME_MUTE] = (SDL_Rect){SCALE4(21, 85, 10, 19)};
-	asset_rects[ASSET_VOLUME] = (SDL_Rect){SCALE4(21, 85, 19, 19)};
-	asset_rects[ASSET_BATTERY] = (SDL_Rect){SCALE4(47, 51, 17, 10)};
-	asset_rects[ASSET_BATTERY_LOW] = (SDL_Rect){SCALE4(66, 51, 17, 10)};
-	asset_rects[ASSET_BATTERY_FILL] = (SDL_Rect){SCALE4(81, 33, 12, 6)};
-	asset_rects[ASSET_BATTERY_FILL_LOW] = (SDL_Rect){SCALE4(1, 55, 12, 6)};
-	asset_rects[ASSET_BATTERY_BOLT] = (SDL_Rect){SCALE4(81, 41, 12, 6)};
-	asset_rects[ASSET_SCROLL_UP] = (SDL_Rect){SCALE4(97, 23, 24, 6)};
-	asset_rects[ASSET_SCROLL_DOWN] = (SDL_Rect){SCALE4(97, 31, 24, 6)};
-	asset_rects[ASSET_WIFI] = (SDL_Rect){SCALE4(1, 104, 12, 12)};
-	asset_rects[ASSET_WIFI_MED] = (SDL_Rect){SCALE4(14, 104, 12, 12)};
-	asset_rects[ASSET_WIFI_LOW] = (SDL_Rect){SCALE4(27, 104, 12, 12)};
-	asset_rects[ASSET_WIFI_OFF] = (SDL_Rect){SCALE4(40, 104, 12, 12)};
-	asset_rects[ASSET_CHECKCIRCLE] = (SDL_Rect){SCALE4(1, 117, 10, 10)};
-	asset_rects[ASSET_LOCK] = (SDL_Rect){SCALE4(12, 116, 8, 11)};
-	asset_rects[ASSET_HOLE] = (SDL_Rect){SCALE4(1, 63, 20, 20)};
-	asset_rects[ASSET_GAMEPAD] = (SDL_Rect){SCALE4(91, 51, 17, 10)};
-	asset_rects[ASSET_SETTINGS] = (SDL_Rect){SCALE4(21, 117, 10, 10)};
-	asset_rects[ASSET_STORE] = (SDL_Rect){SCALE4(66, 117, 10, 10)};
-	asset_rects[ASSET_POWEROFF] = (SDL_Rect){SCALE4(43, 117, 10, 10)};
-	asset_rects[ASSET_SUSPEND] = (SDL_Rect){SCALE4(32, 117, 10, 10)};
-	asset_rects[ASSET_RESTART] = (SDL_Rect){SCALE4(54, 119, 11, 8)};
-	asset_rects[ASSET_SCREENSHOT] = (SDL_Rect){SCALE4(105, 104, 12, 12)};
-	asset_rects[ASSET_RECORD] = (SDL_Rect){SCALE4(78, 117, 10, 10)};
-	asset_rects[ASSET_BLUETOOTH] = (SDL_Rect){SCALE4(53, 104, 12, 12)};
-	asset_rects[ASSET_BLUETOOTH_OFF] = (SDL_Rect){SCALE4(66, 104, 12, 12)};
-	asset_rects[ASSET_AUDIO] = (SDL_Rect){SCALE4(79, 104, 12, 12)};
-	asset_rects[ASSET_CONTROLLER] = (SDL_Rect){SCALE4(92, 104, 12, 12)};
+	GFX_initAssetRectsInto(asset_rects, FIXED_SCALE);
 }
 
 SDL_Surface* GFX_init(int mode) {
@@ -717,16 +782,42 @@ void GFX_setScreen(SDL_Surface* s) {
 	if (s)
 		gfx.screen = s;
 }
+static void hwChromeFree(void);	   // the chrome-scale status-group context (below)
+static void hwIndicatorFree(void); // and the indicator's
 void GFX_quit(void) {
 	GFX_finishStartupBoost();
 
+	if (font_reload_hook)
+		font_reload_hook(); // runtime font caches close while the TTF state is intact
+
+	// cached text keys on the font pointers closed below
+	GFX_clearTextCache();
+	hwChromeFree();
+	hwIndicatorFree();
+
+	TTF_CloseFont(font.xlarge);
+	TTF_CloseFont(font.title);
 	TTF_CloseFont(font.large);
 	TTF_CloseFont(font.medium);
 	TTF_CloseFont(font.small);
 	TTF_CloseFont(font.tiny);
 	TTF_CloseFont(font.micro);
+	memset(&font, 0, sizeof(font));
+	TTF_CloseFont(font_ar.xlarge);
+	TTF_CloseFont(font_ar.title);
+	TTF_CloseFont(font_ar.large);
+	TTF_CloseFont(font_ar.medium);
+	TTF_CloseFont(font_ar.small);
+	TTF_CloseFont(font_ar.tiny);
+	TTF_CloseFont(font_ar.micro);
+	memset(&font_ar, 0, sizeof(font_ar));
+	TTF_CloseFont(hint_tiny_chrome);
+	hint_tiny_chrome = NULL;
+	TTF_CloseFont(hint_tiny_chrome_ar);
+	hint_tiny_chrome_ar = NULL;
 
 	SDL_FreeSurface(gfx.assets);
+	gfx.assets = NULL;
 
 	CFG_quit();
 
@@ -1564,7 +1655,7 @@ void GFX_assetRect(int asset, SDL_Rect* dst_rect) {
 //   NAV_IMAGE - a full-colour glyph (the d-pad, white cross with the active axis
 //               in red); blitted as authored, never tinted.
 // Any button without art (or a missing asset on device) returns NULL and falls
-// back to the drawn circle/pill in GFX_blitButton.
+// back to the drawn circle/pill in GFX_blitButtonChrome.
 typedef enum { NAV_DISC,
 			   NAV_LABEL,
 			   NAV_IMAGE } NavGlyphStyle;
@@ -1574,23 +1665,24 @@ static struct NavGlyph {
 	NavGlyphStyle style;
 	SDL_Surface* surf;
 	uint8_t tried;
+	SDL_Surface* nsurf; // at CHROME_SCALE (the hint bar's), when it differs from FIXED_SCALE
+	uint8_t ntried;
 } nav_glyphs[] = {
-	{"A", "nav_button_a", NAV_DISC, NULL, 0},
-	{"B", "nav_button_b", NAV_DISC, NULL, 0},
-	{"X", "nav_button_x", NAV_DISC, NULL, 0},
-	{"Y", "nav_button_y", NAV_DISC, NULL, 0},
-	{"L1", "nav_trigger_l1", NAV_DISC, NULL, 0},
-	{"L2", "nav_trigger_l2", NAV_DISC, NULL, 0},
-	{"R1", "nav_trigger_r1", NAV_DISC, NULL, 0},
-	{"R2", "nav_trigger_r2", NAV_DISC, NULL, 0},
-	{"L3", "nav_button_l3", NAV_DISC, NULL, 0},
-	{"R3", "nav_button_r3", NAV_DISC, NULL, 0},
-	{"MENU", "nav_button_menu", NAV_DISC, NULL, 0},
-	{"HOME", "nav_button_home", NAV_DISC, NULL, 0},
-	{"START", "nav_button_start", NAV_LABEL, NULL, 0},
-	{"SELECT", "nav_button_select", NAV_LABEL, NULL, 0},
-	{"LEFT/RIGHT", "nav_dpad_horizontal", NAV_IMAGE, NULL, 0},
-	{"UP/DOWN", "nav_dpad_vertical", NAV_IMAGE, NULL, 0},
+	{"A", "nav_button_a", NAV_DISC, NULL, 0, NULL, 0},
+	{"B", "nav_button_b", NAV_DISC, NULL, 0, NULL, 0},
+	{"X", "nav_button_x", NAV_DISC, NULL, 0, NULL, 0},
+	{"Y", "nav_button_y", NAV_DISC, NULL, 0, NULL, 0},
+	{"L1", "nav_trigger_l1", NAV_DISC, NULL, 0, NULL, 0},
+	{"L2", "nav_trigger_l2", NAV_DISC, NULL, 0, NULL, 0},
+	{"R1", "nav_trigger_r1", NAV_DISC, NULL, 0, NULL, 0},
+	{"R2", "nav_trigger_r2", NAV_DISC, NULL, 0, NULL, 0},
+	{"L3", "nav_button_l3", NAV_DISC, NULL, 0, NULL, 0},
+	{"R3", "nav_button_r3", NAV_DISC, NULL, 0, NULL, 0},
+	{"MENU", "nav_button_menu", NAV_DISC, NULL, 0, NULL, 0},
+	{"HOME", "nav_button_home", NAV_DISC, NULL, 0, NULL, 0},
+	{"START", "nav_button_start", NAV_LABEL, NULL, 0, NULL, 0},
+	{"SELECT", "nav_button_select", NAV_LABEL, NULL, 0, NULL, 0},
+	{"LEFT/RIGHT", "nav_dpad_horizontal", NAV_IMAGE, NULL, 0, NULL, 0},
 };
 // Glyph PNGs are per-scale (@2x/@3x); drop them so the next lookup loads the
 // current scale.
@@ -1600,54 +1692,72 @@ static void GFX_resetNavGlyphs(void) {
 			SDL_FreeSurface(nav_glyphs[i].surf);
 		nav_glyphs[i].surf = NULL;
 		nav_glyphs[i].tried = 0;
+		if (nav_glyphs[i].nsurf)
+			SDL_FreeSurface(nav_glyphs[i].nsurf);
+		nav_glyphs[i].nsurf = NULL;
+		nav_glyphs[i].ntried = 0;
 	}
 }
-static struct NavGlyph* GFX_getNavGlyph(const char* button) {
+// The glyph surface for `button` at `scale` (FIXED_SCALE's cache, or the CHROME_SCALE one when they differ), or NULL
+// when the button has no art (the drawn fallback). Baked per CHROME_SCALE (scripts/gen-nav-icons.py): @3x, @2.4375x and @2.25x.
+static SDL_Surface* GFX_getNavGlyphAt(const char* button, float scale) {
 	if (!button || !button[0])
 		return NULL;
+	bool native = scale != FIXED_SCALE;
 	for (int i = 0; i < (int)(sizeof(nav_glyphs) / sizeof(nav_glyphs[0])); i++) {
 		struct NavGlyph* g = &nav_glyphs[i];
 		if (strcmp(button, g->key) != 0)
 			continue;
-		if (g->surf)
-			return g;
-		if (g->tried)
+		SDL_Surface** surf = native ? &g->nsurf : &g->surf;
+		uint8_t* tried = native ? &g->ntried : &g->tried;
+		if (*surf)
+			return *surf;
+		if (*tried)
 			return NULL; // asset absent on device — use the drawn fallback
-		g->tried = 1;
+		*tried = 1;
 		char path[MAX_PATH];
-		sprintf(path, "%s/%s@%ix.png", RES_PATH, g->file, FIXED_SCALE);
+		sprintf(path, "%s/%s@%gx.png", RES_PATH, g->file, scale);
 		SDL_Surface* s = IMG_Load(path);
 		if (s) {
 			SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_BLEND);
-			g->surf = s;
-			return g;
+			*surf = s;
 		}
-		return NULL;
+		return *surf;
 	}
 	return NULL;
 }
-int GFX_getButtonWidth(char* hint, char* button) {
+// A button hint drawn at `scale` (FIXED_SCALE, or the fractional CHROME_SCALE): its glyphs, sizes and label font
+// (`tiny`, FONT_TINY at that scale).
+static int GFX_getButtonWidthAt(char* hint, char* button, float scale, TTF_Font* tiny) {
 	int button_width = 0;
 	int width;
-	int btn_sz = SCALE1(BUTTON_SIZE);
+	int btn_sz = (int)(scale * BUTTON_SIZE + 0.5f);
 
 	button = (char*)PAD_buttonLabel(button);
 
-	struct NavGlyph* g = GFX_getNavGlyph(button);
-	if (g) {
-		button_width += g->surf->w; // both styles advance by the glyph width
+	SDL_Surface* glyph = GFX_getNavGlyphAt(button, scale);
+	if (glyph) {
+		button_width += glyph->w; // both styles advance by the glyph width
 	} else if (strlen(button) == 1) {
 		button_width += btn_sz;
 	} else {
 		button_width += btn_sz / 2;
-		GFX_measureText(font.tiny, button, &width, NULL);
+		GFX_measureText(tiny, button, &width, NULL);
 		button_width += width;
 	}
-	button_width += SCALE1(BUTTON_TEXT_GAP);
+	button_width += (int)(scale * BUTTON_TEXT_GAP + 0.5f);
 
-	GFX_measureText(font.tiny, hint, &width, NULL);
+	GFX_measureText(tiny, hint, &width, NULL);
 	button_width += width;
 	return button_width;
+}
+// The hint bar's own size: CHROME_SCALE whatever the UI scale (the UI scale's font when they match).
+static TTF_Font* hintTinyChrome(void) {
+	return (CHROME_SCALE == FIXED_SCALE || !hint_tiny_chrome) ? font.tiny : hint_tiny_chrome;
+}
+int GFX_getButtonWidthChrome(char* hint, char* button) {
+	TTF_Font* tiny = hintTinyChrome();
+	return GFX_getButtonWidthAt(hint, button, tiny == font.tiny ? FIXED_SCALE : CHROME_SCALE, tiny);
 }
 static uint32_t gfx_px_get(SDL_Surface* s, int x, int y) {
 	uint8_t* p = (uint8_t*)s->pixels + y * s->pitch + x * s->format->BytesPerPixel;
@@ -1726,10 +1836,11 @@ static void GFX_drawFilledRoundedRect(SDL_Surface* sur, int x, int y, int w, int
 	if (SDL_MUSTLOCK(sur))
 		SDL_UnlockSurface(sur);
 }
-void GFX_blitButton(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect) {
+static void GFX_blitButtonAt(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect, float scale,
+							 TTF_Font* tiny) {
 	SDL_Surface* text;
 	int ox = 0;
-	int btn_sz = SCALE1(BUTTON_SIZE);
+	int btn_sz = (int)(scale * BUTTON_SIZE + 0.5f);
 
 	button = (char*)PAD_buttonLabel(button);
 	// Drawn fallback (any button with no nav_*.png glyph, e.g. "L1/R1" combo
@@ -1739,13 +1850,12 @@ void GFX_blitButton(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_re
 	Uint32 btn_color = SDL_MapRGB(dst->format, TRIAD_WHITE);
 
 	// button
-	struct NavGlyph* g = GFX_getNavGlyph(button);
-	if (g) {
+	SDL_Surface* glyph = GFX_getNavGlyphAt(button, scale);
+	if (glyph) {
 		// Show every glyph in its native colours (white masks; the d-pad's
 		// white + red) with no tint, so the button hint matches the white
 		// description text. Disc glyphs read as a white disc with the symbol
 		// knocked out; the .style field is kept for reference only.
-		SDL_Surface* glyph = g->surf;
 		int gy = dst_rect->y + (btn_sz - glyph->h) / 2;
 		GFX_blitSurfaceColor(glyph, NULL, dst, &(SDL_Rect){dst_rect->x, gy}, RGB_WHITE);
 		ox += glyph->w;
@@ -1753,12 +1863,12 @@ void GFX_blitButton(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_re
 		GFX_drawFilledCircle(dst, dst_rect->x + btn_sz / 2, dst_rect->y + btn_sz / 2, btn_sz / 2, btn_color);
 
 		// label (cached — hint bars redraw every frame during list animation)
-		text = GFX_getCachedText(font.tiny, button, COLOR_BLACK);
+		text = GFX_getCachedText(tiny, button, COLOR_BLACK);
 		if (text)
 			SDL_BlitSurface(text, NULL, dst, &(SDL_Rect){dst_rect->x + (btn_sz - text->w) / 2, dst_rect->y + (btn_sz - text->h) / 2});
 		ox += btn_sz;
 	} else {
-		text = GFX_getCachedText(font.tiny, button, COLOR_BLACK);
+		text = GFX_getCachedText(tiny, button, COLOR_BLACK);
 		int pill_w = btn_sz / 2 + (text ? text->w : 0);
 		GFX_drawFilledRoundedRect(dst, dst_rect->x, dst_rect->y, pill_w, btn_sz, btn_color);
 		ox += btn_sz / 4;
@@ -1770,13 +1880,17 @@ void GFX_blitButton(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_re
 		ox += btn_sz / 4;
 	}
 
-	ox += SCALE1(BUTTON_TEXT_GAP);
+	ox += (int)(scale * BUTTON_TEXT_GAP + 0.5f);
 
 	// hint text (cached; colour is part of the cache key so theme changes are safe)
 	SDL_Color text_color = uintToColour(THEME_COLOR6_255);
-	text = GFX_getCachedText(font.tiny, hint, text_color);
+	text = GFX_getCachedText(tiny, hint, text_color);
 	if (text)
 		SDL_BlitSurface(text, NULL, dst, &(SDL_Rect){ox + dst_rect->x, dst_rect->y + (btn_sz - text->h) / 2, text->w, text->h});
+}
+void GFX_blitButtonChrome(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect) {
+	TTF_Font* tiny = hintTinyChrome();
+	GFX_blitButtonAt(hint, button, dst, dst_rect, tiny == font.tiny ? FIXED_SCALE : CHROME_SCALE, tiny);
 }
 void GFX_blitMessage(TTF_Font* font, char* msg, SDL_Surface* dst, SDL_Rect* dst_rect) {
 	if (!dst_rect)
@@ -1830,12 +1944,17 @@ void GFX_blitMessage(TTF_Font* font, char* msg, SDL_Surface* dst, SDL_Rect* dst_
 	}
 }
 
+// The status group's drawing scale while GFX_blitHardwareGroup draws it at CHROME_SCALE (0: FIXED_SCALE, as for every
+// other caller of the helpers below).
+static float hw_scale = 0;
+#define HW1(a) (hw_scale > 0 ? (int)((a) * hw_scale + 0.5f) : SCALE1(a))
+
 void GFX_blitBatteryAtPosition(SDL_Surface* dst, int x, int y) {
 	SDL_Rect battery_rect = asset_rects[ASSET_BATTERY];
 
 	if (SDL_AtomicGet(&pwr.is_charging)) {
 		GFX_blitAssetColor(ASSET_BATTERY, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
-		GFX_blitAssetColor(ASSET_BATTERY_BOLT, NULL, dst, &(SDL_Rect){x + SCALE1(3), y + SCALE1(2)}, THEME_COLOR6);
+		GFX_blitAssetColor(ASSET_BATTERY_BOLT, NULL, dst, &(SDL_Rect){x + HW1(3), y + HW1(2)}, THEME_COLOR6);
 	} else {
 		int percent = SDL_AtomicGet(&pwr.charge);
 		GFX_blitAssetColor(percent <= 10 ? ASSET_BATTERY_LOW : ASSET_BATTERY, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
@@ -1858,7 +1977,7 @@ void GFX_blitBatteryAtPosition(SDL_Surface* dst, int x, int y) {
 				clip.x = fill_rect.w - clip.w;
 				clip.y = 0;
 				GFX_blitAssetColor(percent <= 20 ? ASSET_BATTERY_FILL_LOW : ASSET_BATTERY_FILL, &clip, dst,
-								   &(SDL_Rect){x + SCALE1(3) + clip.x, y + SCALE1(2)}, THEME_COLOR6);
+								   &(SDL_Rect){x + HW1(3) + clip.x, y + HW1(2)}, THEME_COLOR6);
 			}
 		}
 	}
@@ -1872,12 +1991,12 @@ int GFX_blitHardwareIndicator(SDL_Surface* dst, int x, int y, IndicatorType indi
 	int setting_max;
 	int asset;
 
-	int ow = SCALE1(HW_INDICATOR_WIDTH);
+	int ow = HW1(HW_INDICATOR_WIDTH);
 	int ox = x;
 	int oy = y;
 
 	// Draw the pill background
-	GFX_blitPillLight(ASSET_WHITE_PILL, dst, &(SDL_Rect){ox, oy, ow, SCALE1(PILL_SIZE)});
+	GFX_blitPillLight(ASSET_WHITE_PILL, dst, &(SDL_Rect){ox, oy, ow, HW1(PILL_SIZE)});
 
 	// Determine which setting to display
 	if (indicator_type == INDICATOR_BRIGHTNESS) {
@@ -1905,20 +2024,20 @@ int GFX_blitHardwareIndicator(SDL_Surface* dst, int x, int y, IndicatorType indi
 	// Draw the icon
 	SDL_Rect asset_rect;
 	GFX_assetRect(asset, &asset_rect);
-	int ax = ox + (SCALE1(PILL_SIZE) - asset_rect.w) / 2;
-	int ay = oy + (SCALE1(PILL_SIZE) - asset_rect.h) / 2;
+	int ax = ox + (HW1(PILL_SIZE) - asset_rect.w) / 2;
+	int ay = oy + (HW1(PILL_SIZE) - asset_rect.h) / 2;
 	GFX_blitAssetColor(asset, NULL, dst, &(SDL_Rect){ax, ay}, THEME_COLOR6);
 
 	// Draw the progress bar background
-	ox += SCALE1(PILL_SIZE);
-	int bar_y = y + SCALE1((PILL_SIZE - SETTINGS_SIZE) / 2);
+	ox += HW1(PILL_SIZE);
+	int bar_y = y + HW1((PILL_SIZE - SETTINGS_SIZE) / 2);
 	GFX_blitPillColor(gfx.mode == MODE_MAIN ? ASSET_BAR_BG : ASSET_BAR_BG_MENU, dst,
-					  &(SDL_Rect){ox, bar_y, SCALE1(SETTINGS_WIDTH), SCALE1(SETTINGS_SIZE)}, THEME_COLOR3, RGB_WHITE);
+					  &(SDL_Rect){ox, bar_y, HW1(SETTINGS_WIDTH), HW1(SETTINGS_SIZE)}, THEME_COLOR3, RGB_WHITE);
 
 	// Draw the progress bar fill
 	float percent = ((float)(setting_value - setting_min) / (setting_max - setting_min));
 	if (indicator_type == 1 || indicator_type == 3 || setting_value > 0) {
-		GFX_blitPillDark(ASSET_BAR, dst, &(SDL_Rect){ox, bar_y, SCALE1(SETTINGS_WIDTH) * percent, SCALE1(SETTINGS_SIZE)});
+		GFX_blitPillDark(ASSET_BAR, dst, &(SDL_Rect){ox, bar_y, HW1(SETTINGS_WIDTH) * percent, HW1(SETTINGS_SIZE)});
 	}
 
 	return ow;
@@ -1933,17 +2052,21 @@ SDL_Surface* GFX_createScreenFormatSurface(int width, int height) {
 		gfx.screen->format->format);
 }
 
-int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting) {
+// The status group drawn at the current scale (HW1), its icons centred in a bar_h band whose top is y0.
+static int hardwareGroupDraw(SDL_Surface* dst, IndicatorType show_setting, int y0) {
 	int ox;
 	int ow = 0;
 
-	int bar_h = SCALE1(BUTTON_SIZE) + SCALE1(BUTTON_MARGIN * 2);
+	int bar_h = HW1(BUTTON_SIZE) + HW1(BUTTON_MARGIN * 2);
+	// the right inset: the screen's edge padding (the same in pixels whatever the scale), as the hint bar's left one
+	int pad = SCALE1(PADDING);
 
 	if (show_setting && !GetHDMI()) {
-		// Use the helper function to render the indicator at the standard position
-		ow = SCALE1(HW_INDICATOR_WIDTH);
-		ox = dst->w - SCALE1(PADDING) - ow;
-		GFX_blitHardwareIndicator(dst, ox, 0, (IndicatorType)show_setting);
+		// the indicator keeps its own size (INDICATOR_SCALE), centred in the top bar
+		int oh;
+		GFX_hardwareIndicatorSize(&ow, &oh);
+		ox = dst->w - pad - ow;
+		GFX_blitHardwareIndicatorFixed(dst, ox, (BAR_HEIGHT - oh) / 2, (IndicatorType)show_setting);
 	} else {
 		ConnectionStrength strength = PLAT_connectionStrength();
 		int show_wifi = strength > SIGNAL_STRENGTH_OFF;
@@ -1959,42 +2082,42 @@ int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting) {
 		SDL_Rect battery_rect = asset_rects[ASSET_BATTERY];
 
 		if (!show_ext_audio && !show_bt_controller && !show_wifi && !show_clock && !show_cap && !show_rec) {
-			ow = battery_rect.w + SCALE1(BUTTON_MARGIN * 2);
-			ox = dst->w - SCALE1(PADDING) - ow;
+			ow = battery_rect.w + HW1(BUTTON_MARGIN * 2);
+			ox = dst->w - pad - ow;
 
 			int battery_x = ox + (ow - battery_rect.w) / 2;
-			int battery_y = (bar_h - battery_rect.h) / 2;
+			int battery_y = y0 + (bar_h - battery_rect.h) / 2;
 
 			GFX_blitBatteryAtPosition(dst, battery_x, battery_y);
 		} else {
-			ow = SCALE1(BUTTON_MARGIN);
+			ow = HW1(BUTTON_MARGIN);
 
 			if (show_rec) {
 				SDL_Rect rec_rect = asset_rects[ASSET_RECORD];
-				ow += rec_rect.w + SCALE1(BUTTON_MARGIN);
+				ow += rec_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_cap) {
 				SDL_Rect cap_rect = asset_rects[ASSET_SCREENSHOT];
-				ow += cap_rect.w + SCALE1(BUTTON_MARGIN);
+				ow += cap_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_ext_audio) {
 				SDL_Rect audio_rect = asset_rects[ASSET_AUDIO];
-				ow += audio_rect.w + SCALE1(BUTTON_MARGIN);
+				ow += audio_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_bt_controller) {
 				SDL_Rect ctrl_rect = asset_rects[ASSET_CONTROLLER];
-				ow += ctrl_rect.w + SCALE1(BUTTON_MARGIN);
+				ow += ctrl_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_wifi) {
 				SDL_Rect wifi_rect = asset_rects[ASSET_WIFI];
-				ow += wifi_rect.w + SCALE1(BUTTON_MARGIN);
+				ow += wifi_rect.w + HW1(BUTTON_MARGIN);
 			}
 
-			ow += battery_rect.w + SCALE1(BUTTON_MARGIN);
+			ow += battery_rect.w + HW1(BUTTON_MARGIN);
 
 			SDL_Surface* clock = NULL; // cache-owned — do not free
 			if (show_clock) {
@@ -2011,47 +2134,47 @@ int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting) {
 				// Cached: redrawn every frame during list animation but the
 				// string only changes once a minute (one stale entry at most).
 				clock = GFX_getCachedText(font.small, display_name, uintToColour(THEME_COLOR6_255));
-				ow += clock_width + SCALE1(BUTTON_MARGIN);
+				ow += clock_width + HW1(BUTTON_MARGIN);
 			}
 
-			ox = dst->w - SCALE1(PADDING) - ow;
+			ox = dst->w - pad - ow;
 
-			ox += SCALE1(BUTTON_MARGIN);
+			ox += HW1(BUTTON_MARGIN);
 
 			if (show_rec) {
 				// classic "recording" red dot
 				SDL_Rect rec_rect = asset_rects[ASSET_RECORD];
-				int y = (bar_h - rec_rect.h) / 2;
+				int y = y0 + (bar_h - rec_rect.h) / 2;
 
 				GFX_blitAssetColor(ASSET_RECORD, NULL, dst, &(SDL_Rect){ox, y}, 0xFF453A);
-				ox += rec_rect.w + SCALE1(BUTTON_MARGIN);
+				ox += rec_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_cap) {
 				// camera: screenshot daemon armed (L2+R2 captures)
 				SDL_Rect cap_rect = asset_rects[ASSET_SCREENSHOT];
-				int y = (bar_h - cap_rect.h) / 2;
+				int y = y0 + (bar_h - cap_rect.h) / 2;
 
 				GFX_blitAssetColor(ASSET_SCREENSHOT, NULL, dst, &(SDL_Rect){ox, y}, THEME_COLOR6);
-				ox += cap_rect.w + SCALE1(BUTTON_MARGIN);
+				ox += cap_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_ext_audio) {
 				SDL_Rect audio_rect = asset_rects[ASSET_AUDIO];
 				int x = ox;
-				int y = (bar_h - audio_rect.h) / 2;
+				int y = y0 + (bar_h - audio_rect.h) / 2;
 
 				GFX_blitAssetColor(ASSET_AUDIO, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
-				ox += audio_rect.w + SCALE1(BUTTON_MARGIN);
+				ox += audio_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_bt_controller) {
 				SDL_Rect ctrl_rect = asset_rects[ASSET_CONTROLLER];
 				int x = ox;
-				int y = (bar_h - ctrl_rect.h) / 2;
+				int y = y0 + (bar_h - ctrl_rect.h) / 2;
 
 				GFX_blitAssetColor(ASSET_CONTROLLER, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
-				ox += ctrl_rect.w + SCALE1(BUTTON_MARGIN);
+				ox += ctrl_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			if (show_wifi) {
@@ -2061,27 +2184,152 @@ int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting) {
 																									: ASSET_WIFI_OFF; // this should use ASSET_WIFI and be greyed out
 				SDL_Rect wifi_rect = asset_rects[asset];
 				int x = ox;
-				int y = (bar_h - wifi_rect.h) / 2;
+				int y = y0 + (bar_h - wifi_rect.h) / 2;
 
 				GFX_blitAssetColor(asset, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
-				ox += wifi_rect.w + SCALE1(BUTTON_MARGIN);
+				ox += wifi_rect.w + HW1(BUTTON_MARGIN);
 			}
 
 			int battery_x = ox;
-			int battery_y = (bar_h - battery_rect.h) / 2;
+			int battery_y = y0 + (bar_h - battery_rect.h) / 2;
 
 			GFX_blitBatteryAtPosition(dst, battery_x, battery_y);
-			ox += battery_rect.w + SCALE1(BUTTON_MARGIN);
+			ox += battery_rect.w + HW1(BUTTON_MARGIN);
 
 			if (show_clock && clock) {
 				int x = ox;
-				int y = (bar_h - clock->h) / 2;
+				int y = y0 + (bar_h - clock->h) / 2;
 				SDL_BlitSurface(clock, NULL, dst, &(SDL_Rect){x, y});
 				// no free — surface is owned by the text cache
 			}
 		}
 	}
 
+	return ow;
+}
+
+// The status group (indicator, or recording, capture, audio, controller, Wi-Fi, battery and clock) keeps the hint bar's
+// CHROME_SCALE whatever the UI scale: drawn with that scale's baked asset sheet (assets@3x / @2.4375x / @2.25x), its rects and
+// fonts, swapped in for the call (the UI thread draws it), and centred in the UI-scaled top bar. Returns its width in px.
+static struct {
+	int built_for;			  // the FIXED_SCALE it was built beside (0: not built)
+	char font_path[MAX_PATH]; // and the system font it opened
+	SDL_Surface* assets;
+	SDL_Rect rects[ASSET_COUNT];
+	TTF_Font *small, *tiny, *micro;
+} hw_chrome;
+
+static void hwChromeFree(void) {
+	if (hw_chrome.assets)
+		SDL_FreeSurface(hw_chrome.assets);
+	// cached text keys on the font pointer: drop these fonts' entries before a later open can reuse the address
+	GFX_forgetFontText(hw_chrome.small);
+	GFX_forgetFontText(hw_chrome.tiny);
+	GFX_forgetFontText(hw_chrome.micro);
+	TTF_CloseFont(hw_chrome.small);
+	TTF_CloseFont(hw_chrome.tiny);
+	TTF_CloseFont(hw_chrome.micro);
+	memset(&hw_chrome, 0, sizeof(hw_chrome));
+}
+
+static bool hwChromeReady(void) {
+	if (CHROME_SCALE == FIXED_SCALE)
+		return false;
+	const char* font_path = GFX_getSystemFontPath();
+	if (hw_chrome.built_for == FIXED_SCALE && hw_chrome.assets && hw_chrome.small &&
+		strcmp(hw_chrome.font_path, font_path) == 0)
+		return true;
+	hwChromeFree();
+	GFX_initAssetRectsInto(hw_chrome.rects, CHROME_SCALE);
+	char path[MAX_PATH];
+	sprintf(path, "%s/assets@%gx.png", RES_PATH, CHROME_SCALE);
+	hw_chrome.assets = IMG_Load(path);
+	hw_chrome.small = TTF_OpenFont(font_path, CHROME1(FONT_SMALL));
+	hw_chrome.tiny = TTF_OpenFont(font_path, CHROME1(FONT_TINY));
+	hw_chrome.micro = TTF_OpenFont(font_path, CHROME1(FONT_MICRO));
+	hw_chrome.built_for = FIXED_SCALE;
+	snprintf(hw_chrome.font_path, sizeof(hw_chrome.font_path), "%s", font_path);
+	if (!hw_chrome.assets || !hw_chrome.small || !hw_chrome.tiny || !hw_chrome.micro) {
+		hwChromeFree();
+		return false;
+	}
+	return true;
+}
+
+int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting) {
+	if (!hwChromeReady())
+		return hardwareGroupDraw(dst, show_setting, 0);
+	int bar_h = BAR_HEIGHT;
+	int chrome_h = CHROME1(BUTTON_SIZE) + CHROME1(BUTTON_MARGIN * 2);
+	int y0 = (bar_h - chrome_h) / 2;
+	// swap the chrome context in
+	SDL_Rect live[ASSET_COUNT];
+	memcpy(live, asset_rects, sizeof(live));
+	SDL_Surface* live_assets = gfx.assets;
+	TTF_Font *live_small = font.small, *live_tiny = font.tiny, *live_micro = font.micro;
+	hw_scale = CHROME_SCALE;
+	memcpy(asset_rects, hw_chrome.rects, sizeof(live));
+	gfx.assets = hw_chrome.assets;
+	font.small = hw_chrome.small, font.tiny = hw_chrome.tiny, font.micro = hw_chrome.micro;
+	int ow = hardwareGroupDraw(dst, show_setting, y0);
+	// and back
+	font.small = live_small, font.tiny = live_tiny, font.micro = live_micro;
+	gfx.assets = live_assets;
+	memcpy(asset_rects, live, sizeof(live));
+	hw_scale = 0;
+	return ow;
+}
+// The volume / brightness / colour-temperature indicator draws at INDICATOR_SCALE (defines.h) whatever the UI scale,
+// with that scale's baked asset sheet (assets@2x / @1.625x / @1.5x) swapped in for the call: the same physical size on
+// every panel, and its PILL_SIZE pill fits inside every top bar (BAR_HEIGHT).
+#define IND1(a) ((int)((a) * INDICATOR_SCALE + 0.5f))
+static struct {
+	bool tried;
+	SDL_Surface* assets;
+	SDL_Rect rects[ASSET_COUNT];
+} hw_ind;
+
+static void hwIndicatorFree(void) {
+	if (hw_ind.assets)
+		SDL_FreeSurface(hw_ind.assets);
+	memset(&hw_ind, 0, sizeof(hw_ind));
+}
+
+static bool hwIndicatorReady(void) {
+	if (!hw_ind.tried) {
+		hw_ind.tried = true;
+		GFX_initAssetRectsInto(hw_ind.rects, INDICATOR_SCALE);
+		char path[MAX_PATH];
+		sprintf(path, "%s/assets@%gx.png", RES_PATH, INDICATOR_SCALE);
+		hw_ind.assets = IMG_Load(path);
+		if (!hw_ind.assets)
+			LOG_info("missing %s: the indicator falls back to the UI scale\n", path);
+	}
+	return hw_ind.assets != NULL;
+}
+
+void GFX_hardwareIndicatorSize(int* w, int* h) {
+	bool fixed = hwIndicatorReady();
+	*w = fixed ? IND1(HW_INDICATOR_WIDTH) : SCALE1(HW_INDICATOR_WIDTH);
+	*h = fixed ? IND1(PILL_SIZE) : SCALE1(PILL_SIZE);
+}
+
+int GFX_blitHardwareIndicatorFixed(SDL_Surface* dst, int x, int y, IndicatorType indicator_type) {
+	if (!hwIndicatorReady())
+		return GFX_blitHardwareIndicator(dst, x, y, indicator_type);
+	// swap the indicator context in (over whatever is live: the UI scale's, or the status group's chrome one)
+	SDL_Rect live[ASSET_COUNT];
+	memcpy(live, asset_rects, sizeof(live));
+	SDL_Surface* live_assets = gfx.assets;
+	float live_scale = hw_scale;
+	hw_scale = INDICATOR_SCALE;
+	memcpy(asset_rects, hw_ind.rects, sizeof(live));
+	gfx.assets = hw_ind.assets;
+	int ow = GFX_blitHardwareIndicator(dst, x, y, indicator_type);
+	// and back
+	gfx.assets = live_assets;
+	memcpy(asset_rects, live, sizeof(live));
+	hw_scale = live_scale;
 	return ow;
 }
 char** GFX_getHardwareHintPairs(IndicatorType show_setting) {
@@ -2691,16 +2939,11 @@ void SND_quit(void) {
 }
 
 // Weak reference: resolves to NULL if -lasound is not linked.
-// (No ALSA on macOS, and Mach-O rejects undefined weak refs at link time.)
-#ifndef __APPLE__
 extern int snd_config_update_free_global(void) __attribute__((weak));
-#endif
 
 void SND_flushALSAConfig(void) {
-#ifndef __APPLE__
 	if (snd_config_update_free_global)
 		snd_config_update_free_global();
-#endif
 }
 
 void SND_resetAudio(double sample_rate, double frame_rate) {
@@ -2741,22 +2984,6 @@ FALLBACK_IMPLEMENTATION int PLAT_lidChanged(int* state) {
 ///////////////////////////////
 
 PAD_Context pad;
-
-#ifdef HAS_GAMECONTROLLER
-// Desktop external-controller support. The handle is opened/closed in PAD_poll
-// on SDL_CONTROLLERDEVICEADDED/REMOVED. Triggers are analog (0..32767); treat
-// one past the half-way point as a digital L2/R2 press.
-static SDL_GameController* gamecontroller = NULL;
-#define GAMECONTROLLER_TRIGGER_THRESHOLD 16384
-// Select+Start pressed together act as MENU: modern macOS reserves the
-// Guide/Home button system-wide (opens the Games app) and offers no way to
-// remap it, so pads need a menu chord that never leaves the app. Tracks the
-// raw held state of both halves; while the chord is latched the raw
-// Select/Start events are swallowed so cores don't see them held.
-static int gc_select_down = 0;
-static int gc_start_down = 0;
-static int gc_menu_chord = 0;
-#endif
 
 #define AXIS_DEADZONE 0x4000
 void PAD_setAnalog(int neg_id, int pos_id, int value, int repeat_at) {
@@ -2816,18 +3043,18 @@ void PAD_reset(void) {
 
 FALLBACK_IMPLEMENTATION void PLAT_pokeCapture(void) {}
 FALLBACK_IMPLEMENTATION void PLAT_setBigCoreOnline(bool online) {
-	(void)online; // single cluster (tg5040, desktop): nothing to hotplug
+	(void)online; // single cluster (tg5040): nothing to hotplug
 }
 FALLBACK_IMPLEMENTATION void PLAT_setCPUSpeedRange(int min_khz, int max_khz) {
 	(void)min_khz;
-	(void)max_khz; // no cpufreq on this platform (desktop)
+	(void)max_khz; // platform has no cpufreq range control
 }
-// tg5040 and desktop: cpu0's cpufreq policy is the only one. tg5050 overrides
+// tg5040: cpu0's cpufreq policy is the only one. tg5050 overrides
 // this to also span the big cluster's policy4 when cpu4 is online.
 FALLBACK_IMPLEMENTATION bool PLAT_getCPUHwRangeKhz(int* min_khz, int* max_khz) {
 	int lo = getInt("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq");
 	int hi = getInt("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
-	if (lo <= 0 || hi <= 0) // no cpufreq (desktop)
+	if (lo <= 0 || hi <= 0) // no cpufreq
 		return false;
 	*min_khz = lo;
 	*max_khz = hi;
@@ -3236,167 +3463,7 @@ FALLBACK_IMPLEMENTATION void PLAT_pollInput(void) {
 				// LOG_info("cancel: %i\n", axis);
 				btn = BTN_NONE;
 			}
-		}
-#ifdef HAS_GAMECONTROLLER
-		// Desktop external controller (SDL_GameController). Face buttons map by
-		// physical position to the Nintendo/device layout: right face =
-		// A/confirm, bottom = B/back. Keyboard (CODE_*) stays live alongside.
-		else if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP) {
-			pressed = event.type == SDL_CONTROLLERBUTTONDOWN;
-			switch (event.cbutton.button) {
-			case SDL_CONTROLLER_BUTTON_A:
-				btn = BTN_B;
-				id = BTN_ID_B;
-				break; // bottom
-			case SDL_CONTROLLER_BUTTON_B:
-				btn = BTN_A;
-				id = BTN_ID_A;
-				break; // right (confirm)
-			case SDL_CONTROLLER_BUTTON_X:
-				btn = BTN_Y;
-				id = BTN_ID_Y;
-				break; // left
-			case SDL_CONTROLLER_BUTTON_Y:
-				btn = BTN_X;
-				id = BTN_ID_X;
-				break; // top
-			case SDL_CONTROLLER_BUTTON_DPAD_UP:
-				btn = BTN_DPAD_UP;
-				id = BTN_ID_DPAD_UP;
-				break;
-			case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-				btn = BTN_DPAD_DOWN;
-				id = BTN_ID_DPAD_DOWN;
-				break;
-			case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-				btn = BTN_DPAD_LEFT;
-				id = BTN_ID_DPAD_LEFT;
-				break;
-			case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-				btn = BTN_DPAD_RIGHT;
-				id = BTN_ID_DPAD_RIGHT;
-				break;
-			case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-				btn = BTN_L1;
-				id = BTN_ID_L1;
-				break;
-			case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
-				btn = BTN_R1;
-				id = BTN_ID_R1;
-				break;
-			case SDL_CONTROLLER_BUTTON_LEFTSTICK:
-				btn = BTN_L3;
-				id = BTN_ID_L3;
-				break;
-			case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
-				btn = BTN_R3;
-				id = BTN_ID_R3;
-				break;
-			case SDL_CONTROLLER_BUTTON_BACK:
-				btn = BTN_SELECT;
-				id = BTN_ID_SELECT;
-				break;
-			case SDL_CONTROLLER_BUTTON_START:
-				btn = BTN_START;
-				id = BTN_ID_START;
-				break;
-			case SDL_CONTROLLER_BUTTON_GUIDE:
-				btn = BTN_MENU;
-				id = BTN_ID_MENU;
-				break; // Home/Guide opens the menu
-			default:
-				break;
-			}
-
-			// Select+Start chord -> MENU (see gc_menu_chord above).
-			if (btn == BTN_SELECT)
-				gc_select_down = pressed;
-			else if (btn == BTN_START)
-				gc_start_down = pressed;
-			if (btn == BTN_SELECT || btn == BTN_START) {
-				if (pressed && gc_select_down && gc_start_down && !gc_menu_chord) {
-					// second half just went down: latch the chord, retract the
-					// first half from pad state (it was delivered when pressed
-					// alone), and deliver this event as a MENU press instead
-					gc_menu_chord = 1;
-					int other = (btn == BTN_SELECT) ? BTN_START : BTN_SELECT;
-					pad.is_pressed &= ~other;
-					pad.just_pressed &= ~other;
-					pad.just_repeated &= ~other;
-					btn = BTN_MENU;
-					id = BTN_ID_MENU;
-				} else if (gc_menu_chord) {
-					if (pressed) {
-						btn = BTN_NONE; // half re-pressed while latched: swallow
-					} else if (pad.is_pressed & BTN_MENU) {
-						btn = BTN_MENU; // first half released: release MENU
-						id = BTN_ID_MENU;
-					} else {
-						btn = BTN_NONE; // second half released: already done
-					}
-					if (!gc_select_down && !gc_start_down)
-						gc_menu_chord = 0;
-				}
-			}
-		} else if (event.type == SDL_CONTROLLERAXISMOTION) {
-			int val = event.caxis.value;
-			// Left stick: analog passthrough to cores (pad.laxis, read by
-			// minarch for RETRO_DEVICE_ANALOG) AND digital d-pad via
-			// PAD_setAnalog so menus and non-analog cores stay usable. Right
-			// stick: analog passthrough only. Triggers: digital past a threshold.
-			switch (event.caxis.axis) {
-			case SDL_CONTROLLER_AXIS_LEFTX:
-				pad.laxis.x = val;
-				PAD_setAnalog(BTN_ID_ANALOG_LEFT, BTN_ID_ANALOG_RIGHT, val, tick + PAD_REPEAT_DELAY);
-				break;
-			case SDL_CONTROLLER_AXIS_LEFTY:
-				pad.laxis.y = val;
-				PAD_setAnalog(BTN_ID_ANALOG_UP, BTN_ID_ANALOG_DOWN, val, tick + PAD_REPEAT_DELAY);
-				break;
-			case SDL_CONTROLLER_AXIS_RIGHTX:
-				pad.raxis.x = val;
-				break;
-			case SDL_CONTROLLER_AXIS_RIGHTY:
-				pad.raxis.y = val;
-				break;
-			case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-				btn = BTN_L2;
-				id = BTN_ID_L2;
-				pressed = val > GAMECONTROLLER_TRIGGER_THRESHOLD;
-				break;
-			case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-				btn = BTN_R2;
-				id = BTN_ID_R2;
-				pressed = val > GAMECONTROLLER_TRIGGER_THRESHOLD;
-				break;
-			default:
-				break;
-			}
-			// same guard as the joystick axis path: a sub-threshold reading
-			// isn't a release unless the button was actually held
-			if (!pressed && btn != BTN_NONE && !(pad.is_pressed & btn))
-				btn = BTN_NONE;
-		} else if (event.type == SDL_CONTROLLERDEVICEADDED) {
-			// covers controllers present at startup and hot-plugged later
-			if (!gamecontroller && SDL_IsGameController(event.cdevice.which))
-				gamecontroller = SDL_GameControllerOpen(event.cdevice.which);
-		} else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
-			if (gamecontroller && event.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamecontroller))) {
-				SDL_GameControllerClose(gamecontroller);
-				gamecontroller = NULL;
-				// Release everything the now-gone controller was holding.
-				// pad.laxis/raxis are written ONLY by the controller axis path
-				// on desktop, so without this an off-center stick at unplug
-				// stays latched with no way to clear it; held buttons/dpad bits
-				// would likewise stick until a matching keyboard event.
-				pad.laxis.x = pad.laxis.y = 0;
-				pad.raxis.x = pad.raxis.y = 0;
-				gc_select_down = gc_start_down = gc_menu_chord = 0;
-				PAD_reset();
-			}
-		}
-#endif
-		else if (event.type == SDL_QUIT) {
+		} else if (event.type == SDL_QUIT) {
 			PWR_powerOff(0);
 		} else if (event.type == SDL_JOYDEVICEADDED || event.type == SDL_JOYDEVICEREMOVED) {
 			PAD_update(&event);
@@ -3405,8 +3472,8 @@ FALLBACK_IMPLEMENTATION void PLAT_pollInput(void) {
 		if (btn == BTN_NONE)
 			continue;
 
-		// One place all three translation branches (keyboard CODE_*, joystick
-		// JOY_*, desktop SDL_CONTROLLER_*) converge to apply btn/id to the pad,
+		// One place both translation branches (keyboard CODE_*, joystick
+		// JOY_*) converge to apply btn/id to the pad,
 		// so a single swap here covers them all. Placed after the BTN_NONE guard
 		// so the hat branch — which exits its loop with id == BTN_ID_A and forces
 		// btn = BTN_NONE — can't be resurrected into a phantom face press.
@@ -3921,7 +3988,7 @@ void PWR_update(bool* _dirty, IndicatorType* _show_setting, PWR_callback_t befor
 		}
 	}
 
-	const int screenOffDelay = HAS_SLEEP ? CFG_getScreenTimeoutSecs() * 1000 : 0;
+	const int screenOffDelay = CFG_getScreenTimeoutSecs() * 1000;
 	if (screenOffDelay == 0 || (now - last_input_at >= screenOffDelay && PWR_preventAutosleep()))
 		last_input_at = now;
 
@@ -3929,7 +3996,7 @@ void PWR_update(bool* _dirty, IndicatorType* _show_setting, PWR_callback_t befor
 	const bool explicit_sleep = pwr.requested_sleep ||
 								(pwr.can_sleep && PAD_justReleased(BTN_SLEEP) && power_pressed_at);
 
-	if (HAS_SLEEP && (explicit_sleep || autosleep_expired)) {
+	if (explicit_sleep || autosleep_expired) {
 		pwr.requested_sleep = 0;
 		if (before_sleep)
 			before_sleep();
@@ -4184,7 +4251,7 @@ int PWR_deepSleep(void) {
 	if (exists(suspend_path)) {
 		LOG_info("suspending using platform suspend executable\n");
 
-		// BIN_PATH is a runtime value on desktop; quote it for the shell.
+		// Quote the path for the shell.
 		char suspend_q[MAX_PATH * 4];
 		strncpy(suspend_q, suspend_path, sizeof(suspend_q) - 1);
 		suspend_q[sizeof(suspend_q) - 1] = '\0';

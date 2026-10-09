@@ -17,34 +17,6 @@
 // by the OSD Music widget (workspace/all/osdmusic) to open the Music Player.
 #define OPEN_PAK_REQUEST_PATH "/tmp/nextui_open"
 
-#ifdef HAS_RUNTIME_PATHS
-// Desktop: roots resolved at runtime (env/HOME) by PATHS_init(PLATFORM),
-// which every main() calls first. Values byte-match the device macros.
-#include "paths.h"
-#define SDCARD_PATH PATHS_SDCARD
-#define ROMS_PATH PATHS_ROMS
-#define ROOT_SYSTEM_PATH PATHS_ROOT_SYSTEM
-#define SYSTEM_PATH PATHS_SYSTEM
-#define RES_PATH PATHS_RES
-#define SHARED_SYSTEM_PATH PATHS_SHARED_SYSTEM
-#define SHARED_BIN_PATH PATHS_SHARED_BIN
-#define USERDATA_PATH PATHS_USERDATA
-#define SHARED_USERDATA_PATH PATHS_SHARED_USERDATA
-#define PAKS_PATH PATHS_PAKS
-#define BIN_PATH PATHS_BIN
-#define TOOLS_PATH PATHS_TOOLS
-#define RECENT_PATH PATHS_RECENT
-#define SHORTCUTS_PATH PATHS_SHORTCUTS
-#define SIMPLE_MODE_PATH PATHS_SIMPLE_MODE
-#define AUTO_RESUME_PATH PATHS_AUTO_RESUME
-#define GAME_SWITCHER_PERSIST_PATH PATHS_GAME_SWITCHER_PERSIST
-#define FAUX_RECENT_PATH PATHS_FAUX_RECENT
-#define COLLECTIONS_PATH PATHS_COLLECTIONS
-#define EMULIST_CACHE_PATH PATHS_EMULIST_CACHE
-#define ROMINDEX_CACHE_PATH PATHS_ROMINDEX_CACHE
-#else
-// Device: compile-time literals, unchanged.
-#define PATHS_init(p) // no-op on device
 #define ROMS_PATH SDCARD_PATH "/Roms"
 #define ROOT_SYSTEM_PATH SDCARD_PATH "/.system/"
 #define SYSTEM_PATH SDCARD_PATH "/.system"
@@ -65,12 +37,12 @@
 #define COLLECTIONS_PATH SDCARD_PATH "/Collections"
 #define EMULIST_CACHE_PATH USERDATA_PATH "/emulist_cache.txt"
 #define ROMINDEX_CACHE_PATH USERDATA_PATH "/romindex_cache.txt"
-#endif
 
 #define RESUME_SLOT_DEFAULT 8
 #define AUTO_RESUME_SLOT 9
 
-#define LAST_PATH "/tmp/last.txt" // transient
+#define LAST_PATH "/tmp/last.txt"		 // transient
+#define MENU_TAB_PATH "/tmp/menutab.txt" // transient, next to LAST_PATH
 #define CHANGE_DISC_PATH "/tmp/change_disc.txt"
 #define RESUME_SLOT_PATH "/tmp/resume_slot.txt"
 #define NETPLAY_LAUNCH_PATH "/tmp/netplay_launch"
@@ -167,6 +139,41 @@ enum {
 #define SCALE1(a) ((a) * FIXED_SCALE)
 #define SCALE2(a, b) ((a) * FIXED_SCALE), ((b) * FIXED_SCALE)
 #define SCALE4(a, b, c, d) ((a) * FIXED_SCALE), ((b) * FIXED_SCALE), ((c) * FIXED_SCALE), ((d) * FIXED_SCALE)
+// device-default ("native") size, whatever the UI scale: the tab row and the hardware status group keep
+// NATIVE_SCALE. Each expansion keeps its call sites' exact operand order and types (int math for
+// NATIVE1; NATIVE_SCALE first, as the sites wrote it), so swapping a site to the macro is pixel-identical.
+#define NATIVE1(a) ((NATIVE_SCALE) * (a))
+// mobile dp / sp at NATIVE_SCALE (dp: a 42 dp row is one 30-unit row; sp: 14 sp is one 12-unit font size). Not folded
+// into a per-dp factor: dp * (F * 30 / 42) rounds differently from (dp * F) * 30 / 42.
+#define NX_NATIVE_DP(x) ((int)((x) * NATIVE_SCALE * 30.0f / 42.0f + 0.5f))
+#define NX_NATIVE_SP(x) ((int)((x) * NATIVE_SCALE * 12.0f / 14.0f + 0.5f))
+// The button hint bar, the page titles and the status group keep the Brick's physical size whatever the UI scale and
+// the panel: CHROME_SCALE (platform.h) is the Brick's 3x times the panel's density over the Brick's 400 ppi, rounded
+// so its asset sheet is whole pixels. The fractional sets are baked: assets@<s>x.png (scripts/gen-chrome-assets.py)
+// and nav_*@<s>x.png (scripts/gen-nav-icons.py).
+#define CHROME1(a) ((int)((a) * CHROME_SCALE + 0.5f))
+// The top bar's and the hint bar's height: the device's default scale's whatever the UI scale, so the UI scale moves
+// neither the page's top nor its bottom (their contents are CHROME_SCALE, which always fits).
+#define BAR_HEIGHT NATIVE1(BUTTON_SIZE + BUTTON_MARGIN * 2)
+#define NX_CHROME_SP(x) ((int)((x) * CHROME_SCALE * 12.0f / 14.0f + 0.5f))
+#define NX_CHROME_DP(x) ((int)((x) * CHROME_SCALE * 30.0f / 42.0f + 0.5f))
+// The volume / brightness / colour-temperature indicator: two thirds of CHROME_SCALE (2 on the Brick, 1.625 on the Brick Pro,
+// 1.5 on the Smart Pro family), so its PILL_SIZE pill is one physical size and fits inside every panel's top bar.
+// Its sheets: assets@2x.png, and the baked assets@1.625x.png and assets@1.5x.png (scripts/gen-chrome-assets.py).
+#define INDICATOR_SCALE (CHROME_SCALE * 2.0f / 3.0f)
+// mobile dp -> pixels (a 42 dp row is one 30-unit PILL_SIZE row)
+#define NX_DP(x) ((int)((x) * FIXED_SCALE * 30.0f / 42.0f + 0.5f))
+// dp float -> pixels, rounded (layout math stays in dp floats until drawing)
+#define NX_DPF(x) ((int)((x) * FIXED_SCALE * 30.0f / 42.0f + 0.5f))
+// mobile sp -> text pixels (14 sp body text is the 12-unit text size)
+#define NX_SP(x) ((int)((x) * FIXED_SCALE * 12.0f / 14.0f + 0.5f))
+// List row text starts NX_LIST_INSET_DP in (game lists, Settings, Tools, every shared list), on the main menu's 24 dp
+// gutter; its selection pill keeps 14 dp (== NATIVE1(BUTTON_PADDING)) round the text, so the pill's edge is 10 dp from
+// the screen's (LIST-LAYOUT §10.1 had 14, which put the pill's rounded end off-screen). Page titles start there too.
+// All three are dp at the device's default scale (NX_NATIVE_DP), so the UI scale doesn't move the left inset.
+#define NX_LIST_INSET_DP 24
+#define NX_RICH_LIST_GAP_DP 14 // a rich list's thumbnail to its text (LIST-LAYOUT §10.2)
+#define NX_MENU_GUTTER_DP 24
 
 ///////////////////////////////
 
@@ -175,14 +182,6 @@ enum {
 #define HAS_MENU_BUTTON (BUTTON_MENU != BUTTON_NA || CODE_MENU != CODE_NA || JOY_MENU != JOY_NA)
 #define HAS_HOME_BUTTON (BUTTON_HOME != BUTTON_NA || CODE_HOME != CODE_NA || JOY_HOME != JOY_NA)
 #define HAS_SKINNY_SCREEN (FIXED_WIDTH < 320)
-
-// Whether the platform can enter hybrid sleep (screen-off wait-for-wake loop).
-// Handhelds sleep; desktop opts out in its platform.h — its "sleep" would just
-// blank the window while PWR_waitForWake eats every event (including SDL_QUIT,
-// so the app can't even be closed) and, reporting AC power, never times out.
-#ifndef HAS_SLEEP
-#define HAS_SLEEP 1
-#endif
 
 ///////////////////////////////
 

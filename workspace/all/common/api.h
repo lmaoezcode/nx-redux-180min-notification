@@ -181,6 +181,11 @@ extern GFX_Fonts font_ar; // secondary Arabic font (MiSans Arabic), same sizes
 
 // The Arabic-font counterpart of a primary size-font (NULL if unavailable).
 TTF_Font* GFX_fallbackFontFor(TTF_Font* primary);
+// Register a resolver GFX_fallbackFontFor consults for fonts outside `font` (one slot; common/ui/ui_font.c
+// registers one so its runtime fonts render Arabic with font1-arabic.ttf at their own size and style).
+void GFX_setFallbackFontResolver(TTF_Font* (*resolver)(TTF_Font* primary));
+// The Arabic UI font file (RES_PATH/font1-arabic.ttf), shared by the system fonts and ui_font.c.
+const char* GFX_getArabicFontPath(void);
 
 enum {
 	SHARPNESS_SHARP,
@@ -328,6 +333,15 @@ void GFX_setVsync(int vsync);
 // colour changes need no invalidation because the colour is part of the key.
 // Purpose: eliminate per-frame TTF rasterization in animated list redraws.
 SDL_Surface* GFX_getCachedText(TTF_Font* font, const char* text, SDL_Color color);
+// Drop font's cached text surfaces. Call before TTF_CloseFont on a font that may have been passed to
+// GFX_getCachedText: the cache keys on the pointer, and a font reopened at the same address would hit them.
+void GFX_forgetFontText(TTF_Font* font);
+// The TTF file the system fonts (font.*) were last loaded from: the user's selected UI font.
+const char* GFX_getSystemFontPath(void);
+// Register a callback that closes a runtime font cache (one slot; common/ui/ui_font.c uses it). It runs
+// before every system-font reload (font change, GFX_reloadScale) and in GFX_quit, so the cache reopens on the
+// new font and scale. It must GFX_forgetFontText each font it closes.
+void GFX_setFontReloadHook(void (*hook)(void));
 
 // Arabic-aware text primitives (drop-in replacements). Non-Arabic input takes
 // the identical legacy path; Arabic is shaped + BiDi-reordered and drawn with
@@ -377,8 +391,9 @@ void GFX_blitRectColor(int asset, SDL_Surface* dst, SDL_Rect* dst_rect, uint32_t
 // SDL_FillRect; lower alpha is blended over the existing pixels.
 void GFX_fillRectColor(SDL_Surface* dst, const SDL_Rect* rect, uint32_t mapped_color);
 void GFX_blitBatteryAtPosition(SDL_Surface* dst, int x, int y);
-int GFX_getButtonWidth(char* hint, char* button);
-void GFX_blitButton(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect);
+// A button hint (glyph + label) at CHROME_SCALE (the Brick's physical size on every panel) whatever the UI scale: the button hint bar's.
+int GFX_getButtonWidthChrome(char* hint, char* button);
+void GFX_blitButtonChrome(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect);
 // "Button layout" (Settings > System), read once per process at first poll.
 int PAD_layoutIsXbox(void);
 // Display label for a logical face/chord label ("A", "MENU+X", ...): the
@@ -403,6 +418,10 @@ int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting);
  * @return The width of the rendered indicator
  */
 int GFX_blitHardwareIndicator(SDL_Surface* dst, int x, int y, IndicatorType indicator_type);
+// The same at INDICATOR_SCALE (defines.h), its fixed size whatever the UI scale: the top bar's and the in-game popup's.
+// GFX_hardwareIndicatorSize gives the box it fills.
+void GFX_hardwareIndicatorSize(int* w, int* h);
+int GFX_blitHardwareIndicatorFixed(SDL_Surface* dst, int x, int y, IndicatorType indicator_type);
 
 /**
  * Create a surface with the same pixel format as gfx.screen.
@@ -651,7 +670,7 @@ enum {
 // FAST = where the emulation thread and the core's own threads run, SLOW =
 // minarch's helpers and the GPU driver's threads. tg5050: FAST = the online
 // big cores (cpu4-7), SLOW = cpu0-1. tg5040 (one cluster): FAST = cpu3 alone,
-// SLOW = cpu0-2 — isolation rather than a cluster split. Desktop: no-op.
+// SLOW = cpu0-2 — isolation rather than a cluster split.
 // Unlike PLAT_pinToCores (legacy, untouched, tg5050-only) these exist on both
 // devices, so "none" stays exactly today's behaviour.
 enum {
@@ -762,7 +781,7 @@ void PLAT_setCPUSpeedRange(int min_khz, int max_khz);
 // minarch_cpu_min/max before PLAT_setCPUSpeedRange writes the range to each
 // policy (the kernel then clamps per cluster). tg5040: cpu0. tg5050: cpu0 and,
 // when online, cpu4 — so a big-core cap is not truncated to the little cluster's
-// 1416 MHz ceiling. Returns false when no cpufreq exists (desktop).
+// 1416 MHz ceiling. Returns false when no cpufreq exists.
 bool PLAT_getCPUHwRangeKhz(int* min_khz, int* max_khz);
 // Launcher-only topology hook (nextui/cpu_policy.h): false takes the big core
 // offline while the launcher runs, true brings it back for the boot phase.

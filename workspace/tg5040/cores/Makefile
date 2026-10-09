@@ -14,6 +14,7 @@ CORES+= libretro-uae
 CORES+= mednafen_pce_fast
 CORES+= mednafen_supafaust
 CORES+= mednafen_vb
+CORES+= mednafen_wswan
 CORES+= mgba
 CORES+= pcsx_rearmed
 CORES+= pet
@@ -28,6 +29,7 @@ CORES+= prboom
 CORES+= bluemsx
 CORES+= gearcoleco
 CORES+= flycast
+CORES+= ppsspp
 
 ###############################
 
@@ -65,6 +67,11 @@ mednafen_pce_fast_HASH = 52675734da114a19b3705f03906b1455f3d76644
 
 mednafen_vb_REPO = https://github.com/libretro/beetle-vb-libretro
 mednafen_vb_HASH = 65debc7c4c7b85e2fd988d2be53496c2cf0b5f44
+
+# WonderSwan / WonderSwan Color (WSC.pak). RetroAchievements via the WSC/WS
+# tags (see all/minarch/ra_consoles.h).
+mednafen_wswan_REPO = https://github.com/libretro/beetle-wswan-libretro
+mednafen_wswan_HASH = 4b01295838ea89e3f1355bbe4cb5cf98aa6108cd
 
 fake-08_REPO = https://github.com/jtothebell/fake-08
 fake-08_CORE = fake08_libretro.so
@@ -182,5 +189,14 @@ flycast_HASH = 5aa091fde632fb332c8d8c34e280d62dc951954c
 flycast_SUBMODULES = core/deps/libchdr core/deps/tinygettext core/deps/asio
 flycast_MAKE = sh $(CURDIR)/../../all/cores/flycast/build-libretro.sh $(PLATFORM)
 flycast_DEPS = ../../all/cores/flycast/build-libretro.sh ../../all/cores/flycast/toolchain-aarch64.cmake
+
+# PPSSPP (PSP) libretro core, pinned to the build tested on Brick + Smart Pro S
+# (2026-09-30). CMake via a build script like flycast; shared patches in
+# all/cores/patches/ppsspp/. All bundled submodules (ffmpeg, glslang, ...) are
+# needed, so the template's default recursive init is used.
+ppsspp_REPO = https://github.com/hrydgard/ppsspp
+ppsspp_HASH = 2a1700a7ee495310c52c85f9436652cc8f26e45e
+ppsspp_MAKE = NX_CORES_OUTPUT=$(CURDIR)/$(OUTPUT_ROOT) sh $(CURDIR)/../../all/cores/ppsspp/build-libretro.sh $(PLATFORM)
+ppsspp_DEPS = ../../all/cores/ppsspp/build-libretro.sh ../../all/cores/ppsspp/outline_atomics.c ../../all/cores/flycast/toolchain-aarch64.cmake
 
 include ../../all/cores/Makefile

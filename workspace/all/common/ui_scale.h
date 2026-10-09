@@ -14,7 +14,6 @@
 
 typedef struct {
 	int main_rows;	   // MAIN_ROW_COUNT
-	int settings_rows; // SETTINGS_ROW_COUNT
 	int padding;	   // PADDING
 	int overlay_items; // emulator overlay items per page
 } UIScaleLayout;
@@ -35,12 +34,19 @@ static inline int UIScale_nativeForDevice(const char* device) {
 	return (device && strcmp(device, "brick") == 0) ? 3 : 2;
 }
 
-// 768 rows are the Brick / Brick Pro / desktop panels, 720 the Smart Pro family.
+// 768 rows are the Brick / Brick Pro panels, 720 the Smart Pro family.
 // `scale` is a resolved value (2 or 3); anything other than 3 is treated as 2.
 static inline UIScaleLayout UIScale_layout(int panel_h, int scale) {
 	if (panel_h >= 768)
-		return scale == 3 ? (UIScaleLayout){7, 9, 5, 5} : (UIScaleLayout){11, 11, 10, 8};
-	return scale == 3 ? (UIScaleLayout){6, 8, 10, 5} : (UIScaleLayout){10, 11, 10, 8};
+		return scale == 3 ? (UIScaleLayout){7, 5, 5} : (UIScaleLayout){11, 10, 8};
+	return scale == 3 ? (UIScaleLayout){6, 10, 5} : (UIScaleLayout){10, 10, 8};
+}
+
+// PADDING (units) at `scale`, kept at the device's default scale's size in pixels so the screen-edge gaps don't move
+// with the UI scale: the Brick's 15 px (5 at 3x) is 8 at 2x (16 px), the others' 20 px (10 at 2x) is 7 at 3x (21 px).
+static inline int UIScale_padding(int panel_h, int scale, int native) {
+	int px = UIScale_layout(panel_h, native).padding * native;
+	return (px + scale / 2) / scale;
 }
 
 // Parses one minuisettings.txt line. Returns 1 and stores the sanitized value
