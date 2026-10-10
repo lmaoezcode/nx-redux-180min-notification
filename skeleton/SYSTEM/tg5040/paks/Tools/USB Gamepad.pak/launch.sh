@@ -21,6 +21,125 @@ FAST_INPUTD_WATCHDOG_PID=""
 STOCK_INPUTD_WAS_RUNNING=0
 INPUTD_PROFILE=stock-16ms
 
+# --- USB mode safety begin ---------------------------------------------------
+# Host-tested by workspace/all/usbgamepad/tests/test_launch_usb_restore.sh,
+# which extracts exactly this block. Fail-closed (AGENT.md 11.1): nx_usb_mode.sh
+# is never run when nx_usb_guard.elf is missing or cannot start (for example a
+# Docker-built static binary that aborts with "FATAL: kernel too old"). The
+# only fallbacks are: read `status`, log the mismatch, tell the user, and leave
+# USB in the state it is in (ADB after usbgamepad.elf --restore).
+USB_MODE_SH="$(command -v nx_usb_mode.sh 2>/dev/null)"
+[ -n "$USB_MODE_SH" ] || USB_MODE_SH="${SYSTEM_PATH:-/mnt/SDCARD/.system}/bin/nx_usb_mode.sh"
+# Same resolution order as nx_usb_mode.sh itself.
+USB_GUARD="${NX_USB_GUARD:-${NX_USB_RUNTIME_DIR:-$(dirname "$USB_MODE_SH")}/nx_usb_guard.elf}"
+USB_PRE_MODE=""
+USB_GUARD_OK=0
+USB_SESSION_STARTED=0
+USB_FAIL_MARKER=/tmp/nx_usb_gamepad_restore_failed
+
+usb_log() {
+	printf 'usbgamepad: %s\n' "$*" >> "$LOG_FILE"
+}
+
+usb_mode_status() {
+	"$USB_MODE_SH" status 2>/dev/null
+}
+
+# $1 on-screen text, $2 hint. Best effort, never blocks for more than 6 s.
+usb_notice() {
+	command -v show2.elf >/dev/null 2>&1 || return 0
+	show2.elf \
+		--mode=progress \
+		--image="${SYSTEM_PATH:-/mnt/SDCARD/.system}/res/logo.png" \
+		--bgcolor=0x000000 \
+		--fontcolor=0xFF6666 \
+		--text="$1" \
+		--hint="$2" \
+		--timeout=6 \
+		--texty=78 \
+		--progressy=95 >> "$LOG_FILE" 2>&1
+}
+
+# The guard is exec'd by every nx_usb_mode.sh action except `status`. --holders
+# only scans /proc: it proves the binary starts without any USB/SD I/O.
+usb_guard_usable() {
+	if [ ! -x "$USB_GUARD" ]; then
+		usb_log "USB guard missing or not executable: $USB_GUARD"
+		return 1
+	fi
+	"$USB_GUARD" --holders /nx-usb-guard-preflight >/dev/null 2>> "$LOG_FILE"
+	guard_rc=$?
+	if [ "$guard_rc" -ne 0 ]; then
+		usb_log "USB guard did not start rc=$guard_rc (134 = abort, e.g. FATAL: kernel too old from a Docker-built static binary; check readelf -n shows ABI <= 3.7.0): $USB_GUARD"
+		return 1
+	fi
+	return 0
+}
+
+# Before ANY change: guard usable and USB mode known. Returns 1 to refuse; in
+# that case nothing was touched, so MTP/ADB keeps running as before.
+usb_preflight() {
+	if ! usb_guard_usable; then
+		usb_notice "USB helper cannot start" "USB left unchanged. Log: $LOG_FILE"
+		return 1
+	fi
+	USB_GUARD_OK=1
+	USB_PRE_MODE="$(usb_mode_status)"
+	case "$USB_PRE_MODE" in
+		mtp|adb) usb_log "USB mode before session: $USB_PRE_MODE" ;;
+		*)
+			usb_log "USB mode before session is '$USB_PRE_MODE'; refusing to start"
+			usb_notice "USB is busy ($USB_PRE_MODE)" "Close USB Storage first. Log: $LOG_FILE"
+			return 1
+			;;
+	esac
+	return 0
+}
+
+# The bottom port has one device controller, so MTP and the gamepad cannot own
+# it simultaneously. Marks the session started so cleanup verifies the mode.
+usb_enter_gamepad_mode() {
+	USB_SESSION_STARTED=1
+	"$USB_MODE_SH" stop >> "$LOG_FILE" 2>&1
+	stop_rc=$?
+	if [ "$stop_rc" -ne 0 ]; then
+		usb_log "nx_usb_mode.sh stop failed rc=$stop_rc; not starting the gamepad"
+		usb_notice "USB mode change failed" "Log: $LOG_FILE"
+		return 1
+	fi
+	return 0
+}
+
+# Run once from cleanup(): bring USB back to the mode seen before the session.
+# At most ONE guarded `restore` call, never retried, never run without a guard
+# that passed usb_preflight(). Always verified with the guard-free `status`.
+restore_usb_mode() {
+	[ "$USB_SESSION_STARTED" = "1" ] || return 0
+	usb_now="$(usb_mode_status)"
+	if [ "$usb_now" = "$USB_PRE_MODE" ]; then
+		usb_log "USB mode is $usb_now as before the session"
+		rm -f "$USB_FAIL_MARKER"
+		return 0
+	fi
+	restore_rc=""
+	if [ "$USB_PRE_MODE" = "mtp" ] && [ "$USB_GUARD_OK" = "1" ]; then
+		"$USB_MODE_SH" restore >> "$LOG_FILE" 2>&1
+		restore_rc=$?
+		usb_log "nx_usb_mode.sh restore rc=$restore_rc"
+		usb_now="$(usb_mode_status)"
+		if [ "$usb_now" = "$USB_PRE_MODE" ]; then
+			usb_log "USB mode restored to $usb_now"
+			rm -f "$USB_FAIL_MARKER"
+			return 0
+		fi
+	fi
+	usb_log "USB_MODE_NOT_RESTORED expected=${USB_PRE_MODE:-unknown} actual=${usb_now:-unknown} restore_rc=${restore_rc:-not-run}; leaving USB as is"
+	printf 'expected=%s actual=%s restore_rc=%s\n' "${USB_PRE_MODE:-unknown}" "${usb_now:-unknown}" "${restore_rc:-not-run}" > "$USB_FAIL_MARKER" 2>/dev/null
+	usb_notice "USB not restored (now: ${usb_now:-unknown})" "Reboot to get MTP back. Log: $LOG_FILE"
+	return 1
+}
+# --- USB mode safety end -----------------------------------------------------
+
 restore_stock_inputd() {
 	if [ -n "$FAST_INPUTD_WATCHDOG_PID" ] && kill -0 "$FAST_INPUTD_WATCHDOG_PID" 2>/dev/null; then
 		kill -TERM "$FAST_INPUTD_WATCHDOG_PID" 2>/dev/null
@@ -150,18 +269,25 @@ cleanup() {
 	if [ "$KEYMON_WAS_RUNNING" = "1" ] && ! pidof keymon.elf >/dev/null 2>&1; then
 		keymon.elf >/dev/null 2>&1 &
 	fi
-	nx_usb_mode.sh restore >> "$LOG_FILE" 2>&1 || true
+	restore_usb_mode || true
 }
 
 trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$LAYOUT_FILE")"
+
+# Refuse before touching anything when the USB helper chain is not usable.
+# Skipping cleanup here is intentional: nothing has been changed yet.
+if ! usb_preflight; then
+	trap - EXIT HUP INT TERM
+	exit 1
+fi
+
 touch /tmp/stay_awake /tmp/hide_osdd
 
-# The bottom port has one device controller, so MTP and the gamepad cannot own
-# it simultaneously. Cleanup restores the normal ADB + MTP data mode.
-nx_usb_mode.sh stop >> "$LOG_FILE" 2>&1 || true
+# Cleanup returns USB to the mode recorded by usb_preflight (MTP or ADB).
+usb_enter_gamepad_mode || exit 1
 
 INITIAL_LAYOUT=xbox
 if [ -r "$LAYOUT_FILE" ]; then
