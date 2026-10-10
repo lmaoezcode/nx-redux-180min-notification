@@ -77,3 +77,4 @@ scripts/bench/results/**/*.log
 # ScreenScraper dev credentials (scripts/gen-ss-credentials.sh)
 workspace/all/scraper/ss_credentials.h
 .env
+.agents/handoff/
