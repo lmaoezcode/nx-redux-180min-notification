@@ -33,6 +33,7 @@ test:
 	$(HOST_CC) tests/test_ds4_codec.c gamepad_mapper.c ds4_codec.c -o build/tests/test_ds4_codec -O2 -Wall -Wextra -std=c99
 	./build/tests/test_ds4_codec
 	sh tests/test_launch_usb_restore.sh
+	sh tests/test_static_abi_check.sh
 
 clean:
 	rm -rf build
