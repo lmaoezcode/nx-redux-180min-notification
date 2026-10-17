@@ -31,7 +31,7 @@ card() { # dir [with-system]
 for PLAT in tg5040 tg5050; do
 	BOOT="$ROOT/workspace/$PLAT/install/boot.sh"
 	BLOCK="$(sed -n '/^# install\/update$/,/^#kill \$SHOW_PID/p' "$BOOT" \
-		| sed -e 's#cd \$(dirname "\$0")/\$PLATFORM#cd "$TOOLS"#' \
+		| sed -e 's#cd \$(dirname "\$0")/\$PLATFORM#cd "$TOOLS"#' 		      -e 's#cd "\$BOOT_SOURCE_DIR/\$PLATFORM"#cd "$TOOLS"#' \
 		      -e "s#/tmp/show2.fifo#$TMP/fifo#g" -e 's#sleep [0-9]*#true#')"
 	[ -n "$BLOCK" ] || { fail "$PLAT: install/update block not found"; continue; }
 	run() { # card
