@@ -11,6 +11,7 @@ typedef struct {
 	int band_bottom; // the band's bottom edge (fixed: inside the bar; InfoBand_layout: the hint bar's top)
 	int fill_bottom; // where the band's 80% fill stops: always the hint bar's top (screen_h - bar_h)
 	int arrow_x;	 // the arrows' x: the rows' text start (0 = the 14 dp list inset)
+	int info_top;	 // y of the info text when not on the arrows' line (0 = text_top): the empty hint-bar row, hints hidden
 } InfoBandLayout;
 
 // The former game-list geometry, no longer used by nextui (game lists now use InfoBand_fixedLayout too); kept as the
@@ -31,7 +32,7 @@ InfoBandLayout InfoBand_fixedLayout(int screen_h, int bar_h, int list_top, int p
 // rather than lose a row to a pixel-level shortfall (it grows as needed otherwise). Returns n.
 int InfoBand_listFit(int slot, int pitch, int* row_h);
 
-// The hint glyphs' transparent margin above their ink, in px: none. The nav_*.png glyphs (SYSTEM/res, one set per CHROME_SCALE)
+// The hint glyphs' transparent margin above their ink, in px: none. The nav_*.png glyphs (SYSTEM/res, one set per FIXED_SCALE)
 // are cropped to their discs and labels, with ink on their first row, and drawn BUTTON_SIZE tall (no centring offset).
 #define INFOBAND_HINT_GLYPH_INK_MARGIN 0
 

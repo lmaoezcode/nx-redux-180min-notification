@@ -294,17 +294,33 @@ static int on_off_values[] = {0, 1};
 static const char* menu_style_labels[] = {"List", "Grid", "Carousel", "Backdrop"};
 static int menu_style_values[] = {MENU_STYLE_LIST, MENU_STYLE_GRID, MENU_STYLE_CAROUSEL, MENU_STYLE_BACKDROP};
 /* Carousel / Backdrop orientation rows: each sits directly under its style row and shows only while that style
-   has an orientation (sync_layouts_orient_rows) */
+   has an orientation (sync_layouts_rows) */
 static const char* orient_labels[] = {"Horizontal", "Vertical"};
 static int orient_values[] = {MENU_ORIENT_HORIZONTAL, MENU_ORIENT_VERTICAL};
 static SettingItem* menu_orient_items[MENU_CAT_COUNT] = {NULL};
-static SettingsPage layouts_page; // defined with the page below (sync_layouts_orient_rows clamps its scroll)
+/* Each tab's layout row (and the Consoles controller row): shown only while that tab is (sync_layouts_rows) */
+static SettingItem* menu_style_items[MENU_CAT_COUNT] = {NULL};
+static SettingItem* menu_controller_item = NULL;
+static SettingsPage layouts_page; // defined with the page below (sync_layouts_rows clamps its scroll)
 static SettingItem* game_list_orient_item = NULL;
 /* Game lists' Vertical alignment: under their orientation row, shown only while they draw Vertical */
 static const char* valign_labels[] = {"Left", "Right"};
 static int valign_values[] = {MENU_VALIGN_LEFT, MENU_VALIGN_RIGHT};
 static SettingItem* game_list_valign_item = NULL;
+/* Game lists' List art and Backdrop art: under their alignment row, each shown only while they draw its style */
+static const char* list_art_labels[] = {"Screenshot", "Mix", "3D box art", "2D box art", "Wheel", "None"};
+static int list_art_values[] = {GAME_LIST_ART_SCREENSHOT, GAME_LIST_ART_MIX, GAME_LIST_ART_BOXART3D,
+								GAME_LIST_ART_BOXART2D, GAME_LIST_ART_WHEEL, GAME_LIST_ART_NONE};
+static SettingItem* list_art_item = NULL;
+static const char* backdrop_art_labels[] = {"3D box art", "2D box art", "Wheel"};
+static int backdrop_art_values[] = {BACKDROP_ART_BOXART3D, BACKDROP_ART_BOXART2D, BACKDROP_ART_WHEEL};
+static SettingItem* backdrop_art_item = NULL;
 static const char* hide_show_labels[] = {"Hide", "Show"};
+/* The Home tab's layout: under the "Home tab" row, shown only while the tab is */
+// in the display order of the other tabs' rows (List, Grid, Carousel); the stored values stay as they are
+static const char* home_style_labels[] = {"List", "Grid", "Carousel"};
+static int home_style_values[] = {HOME_STYLE_LIST, HOME_STYLE_GRID, HOME_STYLE_CAROUSEL};
+static SettingItem* home_style_item = NULL;
 
 // "Vibration strength": values are libmsettings rumble_strength levels
 // (vib_levels.h); 0 = Normal is the default and sits in the middle of the UI.
@@ -317,12 +333,6 @@ static const char* hint_labels_labels[] = {"Layout letters", "Printed caps"};
 static int hint_labels_values[] = {0, 1};
 // The "Hint labels" row only matters under the Xbox layout; hidden otherwise.
 static SettingItem* hint_labels_item = NULL;
-
-/* UI scale: 0 follows the device; label filled in build_menu_tree. Internal
- * 2x shows as "Small" and 3x as "Large"; stored values stay 0/2/3. */
-static char ui_scale_default_label[24];
-static const char* ui_scale_labels[] = {ui_scale_default_label, "Small", "Large"};
-static int ui_scale_values[] = {0, 2, 3};
 
 /* Dpad mode: Dpad, Joystick, Both */
 static const char* dpad_mode_labels[] = {"Dpad", "Joystick", "Both"};
@@ -608,6 +618,28 @@ static void reset_show_search_hint(void) {
 	CFG_setShowSearchHint(CFG_DEFAULT_SHOWSEARCHHINT);
 }
 
+/* Show recent hint */
+static int get_show_recent_hint(void) {
+	return CFG_getShowRecentHint() ? 1 : 0;
+}
+static void set_show_recent_hint(int v) {
+	CFG_setShowRecentHint(v != 0);
+}
+static void reset_show_recent_hint(void) {
+	CFG_setShowRecentHint(CFG_DEFAULT_SHOWRECENTHINT);
+}
+
+/* Show netplay hint */
+static int get_show_netplay_hint(void) {
+	return CFG_getShowNetplayHint() ? 1 : 0;
+}
+static void set_show_netplay_hint(int v) {
+	CFG_setShowNetplayHint(v != 0);
+}
+static void reset_show_netplay_hint(void) {
+	CFG_setShowNetplayHint(CFG_DEFAULT_SHOWNETPLAYHINT);
+}
+
 /* Show menu animations */
 static int get_menu_animations(void) {
 	return CFG_getMenuAnimations() ? 1 : 0;
@@ -630,31 +662,30 @@ static void reset_menu_transitions(void) {
 	CFG_setMenuTransitions(CFG_DEFAULT_SHOWMENUTRANSITIONS);
 }
 
-/* UI scale: applies to Settings immediately, to everything else on next start */
-static int get_ui_scale(void) {
-	return CFG_getUIScale();
-}
-static void set_ui_scale(int v) {
-	int prev = CFG_getUIScale();
-	CFG_setUIScale(v);
-	if (GFX_reloadScale() != 0)
-		CFG_setUIScale(prev); // asset sheet failed to load: keep the working scale
-	else
-		settings_menu_invalidate_layout(); // drop old-scale list pixel state
-}
-static void reset_ui_scale(void) {
-	set_ui_scale(CFG_DEFAULT_UI_SCALE);
-}
-
 /* Show each orientation row only while its style has an orientation (a main-menu Carousel; a game-list Carousel or
-   Backdrop). The row sits directly under its style row and the page selection is a visible index, so a row that
-   appears or disappears under the style row being cycled leaves the highlight on that style row. */
-static int layouts_orient_rows_shown(void) {
+   Backdrop), the game lists' alignment row only while they draw Vertical, their List art row only while they draw
+   List, their Backdrop art row only while they draw Backdrop, and a tab's layout, orientation and controller rows only
+   while that tab is shown. Each row sits under the row that shows it (its style row, its tab row) and the page
+   selection is a visible index, so a row that appears or disappears under the row being cycled leaves the highlight on
+   that row. */
+static int layouts_rows_shown(void) {
 	int n = game_list_orient_item && game_list_orient_item->visible ? 1 : 0;
 	n += game_list_valign_item && game_list_valign_item->visible ? 1 : 0;
-	for (int c = 0; c < MENU_CAT_COUNT; c++)
+	n += list_art_item && list_art_item->visible ? 1 : 0;
+	n += backdrop_art_item && backdrop_art_item->visible ? 1 : 0;
+	n += home_style_item && home_style_item->visible ? 1 : 0;
+	n += menu_controller_item && menu_controller_item->visible ? 1 : 0;
+	for (int c = 0; c < MENU_CAT_COUNT; c++) {
 		n += menu_orient_items[c] && menu_orient_items[c]->visible ? 1 : 0;
+		n += menu_style_items[c] && menu_style_items[c]->visible ? 1 : 0;
+	}
 	return n;
+}
+
+static bool layouts_tab_shown(int cat) {
+	return cat == MENU_CAT_CONSOLES		 ? CFG_getShowEmulators()
+		   : cat == MENU_CAT_COLLECTIONS ? CFG_getShowCollections()
+										 : CFG_getShowTools();
 }
 
 /* Rows that disappear shorten the page: a window scrolled to its end would end past the last row (an empty slot under
@@ -662,17 +693,28 @@ static int layouts_orient_rows_shown(void) {
    list's own scroll (UI_adjustListScroll) then keeps the highlight in view, which never ends it past the last row
    either. The page selection is a visible index and a cycled style row's orientation row sits under it, so the
    highlight stays on that style row. Rows that appear leave no gap: nothing to do. */
-static void sync_layouts_orient_rows(void) {
-	int before = layouts_orient_rows_shown();
+static void sync_layouts_rows(void) {
+	int before = layouts_rows_shown();
 	for (int c = 0; c < MENU_CAT_COUNT; c++) {
+		bool tab = layouts_tab_shown(c);
+		if (menu_style_items[c])
+			menu_style_items[c]->visible = tab ? 1 : 0;
 		if (menu_orient_items[c])
-			menu_orient_items[c]->visible = MenuStyle_mainMenuHasOrient(CFG_getMenuStyle(c)) ? 1 : 0;
+			menu_orient_items[c]->visible = tab && MenuStyle_mainMenuHasOrient(CFG_getMenuStyle(c)) ? 1 : 0;
 	}
+	if (menu_controller_item)
+		menu_controller_item->visible = CFG_getShowEmulators() ? 1 : 0;
 	if (game_list_orient_item)
 		game_list_orient_item->visible = MenuStyle_gameListHasOrient(CFG_getGameListStyle()) ? 1 : 0;
 	if (game_list_valign_item)
 		game_list_valign_item->visible = CFG_getGameListOrientEffective() == MENU_ORIENT_VERTICAL ? 1 : 0;
-	int gone = before - layouts_orient_rows_shown();
+	if (list_art_item)
+		list_art_item->visible = CFG_getGameListStyle() == MENU_STYLE_LIST ? 1 : 0;
+	if (backdrop_art_item)
+		backdrop_art_item->visible = CFG_getGameListStyle() == MENU_STYLE_BACKDROP ? 1 : 0;
+	if (home_style_item)
+		home_style_item->visible = CFG_getShowHome() ? 1 : 0;
+	int gone = before - layouts_rows_shown();
 	if (gone > 0 && layouts_page.scroll > 0)
 		layouts_page.scroll = layouts_page.scroll > gone ? layouts_page.scroll - gone : 0;
 }
@@ -684,11 +726,11 @@ static void sync_layouts_orient_rows(void) {
 	}                                                            \
 	static void set_menu_style_##_name(int v) {                  \
 		CFG_setMenuStyle(_cat, v);                               \
-		sync_layouts_orient_rows();                              \
+		sync_layouts_rows();                                     \
 	}                                                            \
 	static void reset_menu_style_##_name(void) {                 \
 		CFG_setMenuStyle(_cat, CFG_DEFAULT_MENUSTYLE_FOR(_cat)); \
-		sync_layouts_orient_rows();                              \
+		sync_layouts_rows();                                     \
 	}                                                            \
 	static int get_menu_orient_##_name(void) {                   \
 		return CFG_getMenuOrient(_cat);                          \
@@ -709,22 +751,22 @@ static int get_game_list_style(void) {
 }
 static void set_game_list_style(int v) {
 	CFG_setGameListStyle(v);
-	sync_layouts_orient_rows();
+	sync_layouts_rows();
 }
 static void reset_game_list_style(void) {
 	CFG_setGameListStyle(CFG_DEFAULT_GAMELISTSTYLE);
-	sync_layouts_orient_rows();
+	sync_layouts_rows();
 }
 static int get_game_list_orient(void) {
 	return CFG_getGameListOrient();
 }
 static void set_game_list_orient(int v) {
 	CFG_setGameListOrient(v);
-	sync_layouts_orient_rows();
+	sync_layouts_rows();
 }
 static void reset_game_list_orient(void) {
 	CFG_setGameListOrient(CFG_DEFAULT_GAMELISTORIENT);
-	sync_layouts_orient_rows();
+	sync_layouts_rows();
 }
 static int get_game_list_valign(void) {
 	return CFG_getGameListVAlign();
@@ -735,6 +777,24 @@ static void set_game_list_valign(int v) {
 static void reset_game_list_valign(void) {
 	CFG_setGameListVAlign(CFG_DEFAULT_GAMELISTVALIGN);
 }
+static int get_list_art(void) {
+	return CFG_getGameListArt();
+}
+static void set_list_art(int v) {
+	CFG_setGameListArt(v);
+}
+static void reset_list_art(void) {
+	CFG_setGameListArt(CFG_DEFAULT_GAMELISTART);
+}
+static int get_backdrop_art(void) {
+	return CFG_getBackdropArt();
+}
+static void set_backdrop_art(int v) {
+	CFG_setBackdropArt(v);
+}
+static void reset_backdrop_art(void) {
+	CFG_setBackdropArt(CFG_DEFAULT_BACKDROPART);
+}
 
 /* Show Tools */
 static int get_show_tools(void) {
@@ -742,20 +802,94 @@ static int get_show_tools(void) {
 }
 static void set_show_tools(int v) {
 	CFG_setShowTools(v != 0);
+	sync_layouts_rows();
 }
 static void reset_show_tools(void) {
 	CFG_setShowTools(CFG_DEFAULT_SHOWTOOLS);
+	sync_layouts_rows();
 }
 
-/* Controller art */
-static int get_menu_controller_art(void) {
-	return CFG_getMenuControllerArt() ? 1 : 0;
+/* Show Home */
+static int get_show_home(void) {
+	return CFG_getShowHome() ? 1 : 0;
 }
-static void set_menu_controller_art(int v) {
-	CFG_setMenuControllerArt(v != 0);
+static void set_show_home(int v) {
+	CFG_setShowHome(v != 0);
+	sync_layouts_rows();
 }
-static void reset_menu_controller_art(void) {
-	CFG_setMenuControllerArt(CFG_DEFAULT_MENUCONTROLLERART);
+static void reset_show_home(void) {
+	CFG_setShowHome(CFG_DEFAULT_SHOWHOME);
+	sync_layouts_rows();
+}
+
+/* Home layout */
+static int get_home_style(void) {
+	return CFG_getHomeStyle();
+}
+static void set_home_style(int v) {
+	CFG_setHomeStyle(v);
+}
+static void reset_home_style(void) {
+	CFG_setHomeStyle(CFG_DEFAULT_HOMESTYLE);
+}
+
+/* Controller art: what the List draws behind the Consoles tab */
+static const char* console_art_labels[] = {"Controller", "Background", "None"};
+static int console_art_values[] = {CONSOLE_ART_CONTROLLER, CONSOLE_ART_BACKGROUND, CONSOLE_ART_NONE};
+static int get_console_art(void) {
+	return CFG_getConsoleArt();
+}
+static void set_console_art(int v) {
+	CFG_setConsoleArt(v);
+}
+static void reset_console_art(void) {
+	CFG_setConsoleArt(CFG_DEFAULT_CONSOLEART);
+}
+
+/* Extra info */
+static int get_extra_info(void) {
+	return CFG_getExtraInfo() ? 1 : 0;
+}
+static void set_extra_info(int v) {
+	CFG_setExtraInfo(v != 0);
+}
+static void reset_extra_info(void) {
+	CFG_setExtraInfo(CFG_DEFAULT_EXTRAINFO);
+}
+
+/* Game Switcher layout */
+static const char* switcher_layout_labels[] = {"Full screen", "List"};
+static int switcher_layout_values[] = {SWITCHER_LAYOUT_FULL, SWITCHER_LAYOUT_LIST};
+static int get_switcher_layout(void) {
+	return CFG_getSwitcherLayout();
+}
+static void set_switcher_layout(int v) {
+	CFG_setSwitcherLayout(v);
+}
+static void reset_switcher_layout(void) {
+	CFG_setSwitcherLayout(CFG_DEFAULT_SWITCHERLAYOUT);
+}
+
+/* Page title */
+static int get_page_title(void) {
+	return CFG_getPageTitle() ? 1 : 0;
+}
+static void set_page_title(int v) {
+	CFG_setPageTitle(v != 0);
+}
+static void reset_page_title(void) {
+	CFG_setPageTitle(CFG_DEFAULT_PAGETITLE);
+}
+
+/* Button hints */
+static int get_button_hints(void) {
+	return CFG_getButtonHints() ? 1 : 0;
+}
+static void set_button_hints(int v) {
+	CFG_setButtonHints(v != 0);
+}
+static void reset_button_hints(void) {
+	CFG_setButtonHints(CFG_DEFAULT_BUTTONHINTS);
 }
 
 /* Show collection */
@@ -764,9 +898,11 @@ static int get_show_collections(void) {
 }
 static void set_show_collections(int v) {
 	CFG_setShowCollections(v != 0);
+	sync_layouts_rows();
 }
 static void reset_show_collections(void) {
 	CFG_setShowCollections(CFG_DEFAULT_SHOWCOLLECTIONS);
+	sync_layouts_rows();
 }
 
 /* Show emulator folders*/
@@ -775,9 +911,11 @@ static int get_show_emulators(void) {
 }
 static void set_show_emulators(int v) {
 	CFG_setShowEmulators(v != 0);
+	sync_layouts_rows();
 }
 static void reset_show_emulators(void) {
 	CFG_setShowEmulators(CFG_DEFAULT_SHOWEMULATORS);
+	sync_layouts_rows();
 }
 
 
@@ -1328,6 +1466,10 @@ static const char* get_about_os_version(void) {
 static const char* get_about_busybox(void) {
 	return about_busybox_version;
 }
+// MiSans' license requires the software itself to say it uses MiSans
+static const char* get_about_font(void) {
+	return "MiSans by Xiaomi";
+}
 
 static void init_about_info(void) {
 	/* NxRedux version: read from version.txt and format as "tag (name-hash)" */
@@ -1407,7 +1549,7 @@ static void init_about_info(void) {
 // ============================================
 
 #define MAX_APPEARANCE_ITEMS 28
-#define MAX_LAYOUTS_ITEMS 16
+#define MAX_LAYOUTS_ITEMS 28
 #define MAX_DISPLAY_ITEMS 8
 #define MAX_SYSTEM_ITEMS 24
 #define MAX_FN_ITEMS 20
@@ -1580,9 +1722,10 @@ static void fn_tools_add(const char* dir, const char* pak_name) {
 	fn_tool_count++;
 }
 
-// Collect the same merged set of tool paks nextui's Tools menu lists: SD
-// /Tools first, then the /Tools/<platform> community-pak subfolder, then the
-// system paks — a name in an earlier layer shadows the later ones.
+// Collect the same merged set of tool paks nextui's Tools menu lists: the
+// system paks first, then SD /Tools, then the /Tools/<platform> community-pak
+// subfolder — a name in an earlier layer shadows the later ones (a shipped
+// pak always wins).
 static void fn_tools_scan(void) {
 	fn_tools[0].path[0] = '\0';
 	snprintf(fn_tools[0].name, sizeof(fn_tools[0].name), "%s", "Off");
@@ -1592,7 +1735,7 @@ static void fn_tools_scan(void) {
 	snprintf(plat_path, sizeof(plat_path), "%s/" PLATFORM, TOOLS_PATH);
 	char sys_path[MAX_PATH];
 	snprintf(sys_path, sizeof(sys_path), "%s/Tools", PAKS_PATH);
-	const char* dirs[] = {TOOLS_PATH, plat_path, sys_path};
+	const char* dirs[] = {sys_path, TOOLS_PATH, plat_path};
 
 	for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]); d++) {
 		DIR* dh = opendir(dirs[d]);
@@ -1651,13 +1794,14 @@ static void reset_fn_keys_page(void) {
 // Reset button callbacks (reference pages)
 // ============================================
 
-// Reset the Layouts page. Defaults can show or hide orientation rows above the selected row, so the highlight is
-// kept on the same item (the "Reset to defaults" row when pressed there) by re-mapping it to its new visible index.
+// Reset the Layouts page. Defaults can show or hide rows (orientations, a tab's rows) above the selected row, so the
+// highlight is kept on the same item (the "Reset to defaults" row when pressed there) by re-mapping it to its new
+// visible index.
 // When the reset hides that row, the highlight goes to the nearest visible row above it (the first row if none).
 static void reset_layouts_items(void) {
 	SettingItem* sel = settings_page_visible_item(&layouts_page, layouts_page.selected);
-	settings_page_reset_all(&layouts_page); // style resets re-sync the orientation rows
-	sync_layouts_orient_rows();
+	settings_page_reset_all(&layouts_page); // style and tab resets re-sync the rows they show
+	sync_layouts_rows();
 	if (sel) {
 		int vis = -1;
 		for (int actual = (int)(sel - layouts_page.items); actual >= 0 && vis < 0; actual--)
@@ -1671,7 +1815,6 @@ static void reset_layouts_items(void) {
 }
 static void reset_appearance_page(void) {
 	settings_page_reset_all(&appearance_page);
-	reset_layouts_items(); // reset does not recurse into submenus
 }
 static void reset_layouts_page(void) {
 	reset_layouts_items();
@@ -1765,62 +1908,122 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	int idx;
 
 	// ============================
-	// Layouts page (Appearance submenu)
+	// Layouts page (main page category)
 	// ============================
 	idx = 0;
-	// Each "<tab> orientation" row sits directly under its style row (sync_layouts_orient_rows shows it)
-#define LAYOUTS_ORIENT_ROW(_slot, _label, _desc, _get, _set, _reset)                                       \
-	do {                                                                                                   \
-		_slot = &layouts_items[idx];                                                                       \
-		layouts_items[idx] = (SettingItem)ITEM_CYCLE_INIT(_label, _desc, orient_labels, MENU_ORIENT_COUNT, \
-														  orient_values, _get, _set, _reset);              \
-		layouts_items[idx++].a_cycles = 1;                                                                 \
+	// Grouped by what they shape: each tab's show row, then its layout, orientation and controller rows (shown only
+	// while the tab is, sync_layouts_rows), then the game lists' rows, then the rows for everything, then the boot view
+	// and the Game Switcher.
+#define LAYOUTS_CYCLE_ROW(_label, _desc, _labels, _count, _values, _get, _set, _reset)                 \
+	do {                                                                                               \
+		layouts_items[idx] =                                                                           \
+			(SettingItem)ITEM_CYCLE_INIT(_label, _desc, _labels, _count, _values, _get, _set, _reset); \
+		layouts_items[idx++].a_cycles = 1; /* A flips it too, as LEFT and RIGHT */                     \
+	} while (0)
+	// Each "<tab> orientation" row sits directly under its layout row (sync_layouts_rows shows it)
+#define LAYOUTS_ORIENT_ROW(_slot, _label, _desc, _get, _set, _reset)                                  \
+	do {                                                                                              \
+		_slot = &layouts_items[idx];                                                                  \
+		LAYOUTS_CYCLE_ROW(_label, _desc, orient_labels, MENU_ORIENT_COUNT, orient_values, _get, _set, \
+						  _reset);                                                                    \
 	} while (0)
 	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Consoles", "How the Consoles tab draws.",
+		"Home tab", "Show the Home tab. It still shows when no other tab does.",
+		hide_show_labels, 2, on_off_values, get_show_home, set_show_home, reset_show_home);
+	home_style_item = &layouts_items[idx];
+	LAYOUTS_CYCLE_ROW(
+		"Home layout",
+		"List: Continue, games and tools in one list. Grid: Continue beside tools, games below. Carousel: games in a row, tools below.",
+		home_style_labels, HOME_STYLE_COUNT, home_style_values, get_home_style, set_home_style, reset_home_style);
+
+	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Consoles tab", "Show the Consoles tab.",
+		hide_show_labels, 2, on_off_values, get_show_emulators, set_show_emulators, reset_show_emulators);
+	menu_style_items[MENU_CAT_CONSOLES] = &layouts_items[idx];
+	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Consoles layout", "How the Consoles tab draws.",
 		menu_style_labels, MENUSTYLE_MAIN_COUNT, menu_style_values, get_menu_style_consoles, set_menu_style_consoles, reset_menu_style_consoles);
 	LAYOUTS_ORIENT_ROW(menu_orient_items[MENU_CAT_CONSOLES], "Consoles orientation",
 					   "Whether the Consoles carousel runs across or down.",
 					   get_menu_orient_consoles, set_menu_orient_consoles, reset_menu_orient_consoles);
+	menu_controller_item = &layouts_items[idx];
+	LAYOUTS_CYCLE_ROW(
+		"Consoles controller",
+		"What shows behind the Consoles tab in the List style: each console's controller, your own background "
+		"pictures (bg.png), or nothing.",
+		console_art_labels, CONSOLE_ART_COUNT, console_art_values, get_console_art, set_console_art, reset_console_art);
+
 	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Collections", "How the Collections tab draws.",
+		"Collections tab", "Show the Collections tab.",
+		hide_show_labels, 2, on_off_values, get_show_collections, set_show_collections, reset_show_collections);
+	menu_style_items[MENU_CAT_COLLECTIONS] = &layouts_items[idx];
+	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Collections layout", "How the Collections tab draws.",
 		menu_style_labels, MENUSTYLE_MAIN_COUNT, menu_style_values, get_menu_style_collections, set_menu_style_collections, reset_menu_style_collections);
 	LAYOUTS_ORIENT_ROW(menu_orient_items[MENU_CAT_COLLECTIONS], "Collections orientation",
 					   "Whether the Collections carousel runs across or down.",
 					   get_menu_orient_collections, set_menu_orient_collections, reset_menu_orient_collections);
+
 	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Tools", "How the Tools tab draws.",
+		"Tools tab", "Show the Tools tab.",
+		hide_show_labels, 2, on_off_values, get_show_tools, set_show_tools, reset_show_tools);
+	menu_style_items[MENU_CAT_TOOLS] = &layouts_items[idx];
+	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Tools layout", "How the Tools tab draws.",
 		menu_style_labels, MENUSTYLE_MAIN_COUNT, menu_style_values, get_menu_style_tools, set_menu_style_tools, reset_menu_style_tools);
 	LAYOUTS_ORIENT_ROW(menu_orient_items[MENU_CAT_TOOLS], "Tools orientation",
 					   "Whether the Tools carousel runs across or down.",
 					   get_menu_orient_tools, set_menu_orient_tools, reset_menu_orient_tools);
+
 	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Game lists", "How a console's or collection's games draw.",
+		"Game lists layout", "How a console's or collection's games draw.",
 		menu_style_labels, MENUSTYLE_GAMELIST_COUNT, menu_style_values, get_game_list_style, set_game_list_style, reset_game_list_style);
 	LAYOUTS_ORIENT_ROW(game_list_orient_item, "Game lists orientation",
 					   "Whether a game list's carousel or backdrop runs across or down.",
 					   get_game_list_orient, set_game_list_orient, reset_game_list_orient);
-#undef LAYOUTS_ORIENT_ROW
 	game_list_valign_item = &layouts_items[idx];
-	layouts_items[idx] = (SettingItem)ITEM_CYCLE_INIT(
-		"Vertical alignment", "Which side a vertical game list's stack sits on; its details take the other side.",
+	LAYOUTS_CYCLE_ROW(
+		"Game lists alignment", "Which side a vertical game list's stack sits on; its details take the other side.",
 		valign_labels, MENU_VALIGN_COUNT, valign_values, get_game_list_valign, set_game_list_valign,
 		reset_game_list_valign);
-	layouts_items[idx++].a_cycles = 1;
-	sync_layouts_orient_rows();
-	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Consoles tab", "Show the Consoles tab.",
-		hide_show_labels, 2, on_off_values, get_show_emulators, set_show_emulators, reset_show_emulators);
-	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Collections tab", "Show the Collections tab.",
-		hide_show_labels, 2, on_off_values, get_show_collections, set_show_collections, reset_show_collections);
-	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Tools tab", "Show the Tools tab.",
-		hide_show_labels, 2, on_off_values, get_show_tools, set_show_tools, reset_show_tools);
-	layouts_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Controller", "Show each console's controller behind it in the Consoles tab.",
-		hide_show_labels, 2, on_off_values, get_menu_controller_art, set_menu_controller_art, reset_menu_controller_art);
-	layouts_items[idx - 1].a_cycles = 1; // A flips it too, as LEFT and RIGHT
+	list_art_item = &layouts_items[idx];
+	LAYOUTS_CYCLE_ROW(
+		"List art",
+		"The picture behind the List. Mix, 2D box art and Wheel come from Artwork Manager > Settings. None shows a "
+		"plain list with no picture or background.",
+		list_art_labels, GAME_LIST_ART_COUNT, list_art_values, get_list_art, set_list_art, reset_list_art);
+	backdrop_art_item = &layouts_items[idx];
+	LAYOUTS_CYCLE_ROW(
+		"Backdrop art", "The pictures in the Backdrop's row. 2D box art and Wheel come from Artwork Manager > Settings.",
+		backdrop_art_labels, BACKDROP_ART_COUNT, backdrop_art_values, get_backdrop_art, set_backdrop_art,
+		reset_backdrop_art);
+#undef LAYOUTS_ORIENT_ROW
+
+	LAYOUTS_CYCLE_ROW(
+		"Extra info", "Play time, achievements and Home's monthly stats, in the menus and the Game Switcher.",
+		hide_show_labels, 2, on_off_values, get_extra_info, set_extra_info, reset_extra_info);
+	LAYOUTS_CYCLE_ROW(
+		"Page title", "The tabs and a game list's title. Hidden, L1/R1 still switch tabs.",
+		hide_show_labels, 2, on_off_values, get_page_title, set_page_title, reset_page_title);
+	LAYOUTS_CYCLE_ROW(
+		"Button hints", "Hidden, List game lists and the Game Switcher show play time and achievements.",
+		hide_show_labels, 2, on_off_values, get_button_hints, set_button_hints, reset_button_hints);
+	LAYOUTS_CYCLE_ROW(
+		"Default view", "The initial view to show on boot",
+		default_view_labels, DEFAULT_VIEW_COUNT, default_view_values, get_default_view, set_default_view,
+		reset_default_view);
+	LAYOUTS_CYCLE_ROW(
+		"Game Switcher layout",
+		"Full screen: one game's resume frame at a time. List: the recent games as a list, the selected one's resume "
+		"frame behind it.",
+		switcher_layout_labels, SWITCHER_LAYOUT_COUNT, switcher_layout_values, get_switcher_layout,
+		set_switcher_layout, reset_switcher_layout);
+	LAYOUTS_CYCLE_ROW(
+		"Game Switcher games", "Which recently played games appear in the Game Switcher.",
+		switcher_games_labels, SWITCHER_GAMES_COUNT, switcher_games_values, get_switcher_resumable_only,
+		set_switcher_resumable_only, reset_switcher_resumable_only);
+#undef LAYOUTS_CYCLE_ROW
+	sync_layouts_rows();
 	layouts_items[idx++] = (SettingItem)ITEM_BUTTON_INIT(
 		"Reset to defaults", "Resets all options in this menu to their default values.",
 		reset_layouts_page);
@@ -1829,15 +2032,8 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	// ============================
 	// Appearance page
 	// ============================
-	snprintf(ui_scale_default_label, sizeof(ui_scale_default_label), "Default (%s)",
-			 NATIVE_SCALE == 3 ? "Large" : "Small");
 	idx = 0;
 	// Font selection removed — the UI always uses the MiSans-based font.
-	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"UI scale", "Size of text and menus. Larger scales show fewer rows.",
-		ui_scale_labels, 3, ui_scale_values, get_ui_scale, set_ui_scale, reset_ui_scale);
-	appearance_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
-		"Layouts", "Main menu tab styles and which tabs show.", &layouts_page);
 	appearance_items[idx++] = (SettingItem)ITEM_COLOR_INIT(
 		"Main color", "The color used to render main UI elements.",
 		color_labels, COLOR_COUNT, (int*)color_values, get_color1, set_color1, reset_color1);
@@ -1869,8 +2065,20 @@ static void build_menu_tree(const DeviceInfo* dev) {
 		"Show battery percentage", "Show battery level as percent in the status pill",
 		on_off_labels, 2, on_off_values, get_show_battery_percent, set_show_battery_percent, reset_show_battery_percent);
 	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Show clock", "Show clock in the status pill",
+		on_off_labels, 2, on_off_values, get_show_clock, set_show_clock, reset_show_clock);
+	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Show 24h time format", "Show clock in the 24hrs time format",
+		on_off_labels, 2, on_off_values, get_clock24h, set_clock24h, reset_clock24h);
+	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
 		"Show search hint", "Show the START search button hint on the main menu",
 		on_off_labels, 2, on_off_values, get_show_search_hint, set_show_search_hint, reset_show_search_hint);
+	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Show recent hint", "Show the SELECT recent games button hint on the main menu",
+		on_off_labels, 2, on_off_values, get_show_recent_hint, set_show_recent_hint, reset_show_recent_hint);
+	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Show netplay hint", "Show the Y netplay button hint in game lists and search",
+		on_off_labels, 2, on_off_values, get_show_netplay_hint, set_show_netplay_hint, reset_show_netplay_hint);
 	appearance_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
 		"Show menu animations", "Enable or disable menu animations",
 		on_off_labels, 2, on_off_values, get_menu_animations, set_menu_animations, reset_menu_animations);
@@ -1947,18 +2155,6 @@ static void build_menu_tree(const DeviceInfo* dev) {
 		"Hint labels", "What the A/B/X/Y hints show when Xbox layout is on. Applies as soon as you leave Settings",
 		hint_labels_labels, 2, hint_labels_values, get_hint_labels, set_hint_labels, reset_hint_labels);
 	sync_hint_labels_visibility();
-	system_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Default view", "The initial view to show on boot",
-		default_view_labels, DEFAULT_VIEW_COUNT, default_view_values, get_default_view, set_default_view, reset_default_view);
-	system_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Game Switcher games", "Which recently played games appear in the Game Switcher.",
-		switcher_games_labels, SWITCHER_GAMES_COUNT, switcher_games_values, get_switcher_resumable_only, set_switcher_resumable_only, reset_switcher_resumable_only);
-	system_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Show 24h time format", "Show clock in the 24hrs time format",
-		on_off_labels, 2, on_off_values, get_clock24h, set_clock24h, reset_clock24h);
-	system_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
-		"Show clock", "Show clock in the status pill",
-		on_off_labels, 2, on_off_values, get_show_clock, set_show_clock, reset_show_clock);
 	system_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
 		"Set time and date automatically", "Sync time via NTP (requires internet)",
 		on_off_labels, 2, on_off_values, get_ntp, set_ntp, reset_ntp);
@@ -2170,6 +2366,8 @@ static void build_menu_tree(const DeviceInfo* dev) {
 		"", get_about_os_version);
 	about_items[idx++] = (SettingItem)ITEM_STATIC_INIT(
 		"Busybox version", "", get_about_busybox);
+	about_items[idx++] = (SettingItem)ITEM_STATIC_INIT(
+		"Font", "Third-party licenses are in .system/licenses", get_about_font);
 	about_items[idx++] = (SettingItem)ITEM_BUTTON_INIT(
 		"Updater", "",
 		updater_check_for_updates);
@@ -2187,6 +2385,8 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	}
 	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
 		"Appearance", "UI customization", &appearance_page);
+	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
+		"Layouts", "Menu styles, tabs, hints and boot view", &layouts_page);
 	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(
 		"In-game Notifications", "Save state notifications", &notify_page);
 	main_items[idx++] = (SettingItem)ITEM_SUBMENU_INIT(

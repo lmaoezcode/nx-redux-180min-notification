@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # GCC 8.3 (tg5040) fails class template argument deduction for
 # `new IndependentTask(type, prio, lambda)` in Core/Screenshot.cpp; a factory
 # function template deduces fine on every compiler.

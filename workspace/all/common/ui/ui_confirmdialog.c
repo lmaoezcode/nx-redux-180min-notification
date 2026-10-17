@@ -58,7 +58,7 @@ void UI_renderConfirmDialogHints(SDL_Surface* dst, const char* title,
 	GFX_clearLayers(LAYER_SCROLLTEXT);
 	SDL_FillRect(dst, NULL, SDL_MapRGB(dst->format, 0, 0, 0));
 
-	int btn_sz = CHROME1(BUTTON_SIZE); // the centred button row (UI_renderCenteredButtons)
+	int btn_sz = SCALE1(BUTTON_SIZE); // the centred button row (UI_renderCenteredButtons)
 
 	// Wrap the subtitle ourselves into centered lines so a long subtitle
 	// (a) leaves room for the buttons below it and (b) stays horizontally
@@ -111,8 +111,14 @@ int UI_modalLoop(const UI_ModalOpts* o) {
 	int result = -1;
 	bool dirty = true;
 	uint32_t start = SDL_GetTicks();
-	if (o->clear_layers)
+	if (o->clear_layers) {
 		GFX_clearLayers(LAYER_ALL);
+	} else {
+		// a modal that keeps the layers under it still drops the GPU sprites and the dim band, which composite above
+		// the screen and so over the modal (GFX_clearLayers(LAYER_ALL) drops them too)
+		PLAT_spritesClear();
+		PLAT_setScreenDim(0, 0, 255);
+	}
 	while (1) {
 		if (o->quit_flag && *o->quit_flag)
 			break;

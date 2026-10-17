@@ -70,7 +70,6 @@ uint64_t getMicroseconds(void);
 int clamp(int x, int lower, int upper);
 double clampd(double x, double lower, double upper);
 
-char* findFileInDir(const char* directory, const char* filename);
 
 // Percent-encode src into dst (form style: space -> '+', unreserved kept, rest
 // %XX). dst must hold up to 3x src plus a NUL; encoding stops early if it would
@@ -86,20 +85,31 @@ void ROM_mediaArtPath(const char* rom_path, char* out, size_t out_size);
 // <console>/.media/<variant>/<game>.png; NULL or "" gives the root mix path.
 void ROM_mediaArtVariantPath(const char* rom_path, const char* variant,
 							 char* out, size_t out_size);
+// True when the game art at `path` (a built .media/...png path) exists, as named or as the same name with
+// .jpg or .jpeg (the companion app stores some fetched art as JPEG); `path` is then rewritten to the file
+// found. A miss leaves `path` as given. Only for reading art: paths art is written to stay .png.
+bool ROM_artExists(char* path, size_t size);
 // Path the game lists should display for an ArtType (config.h). With
 // `fallback_to_mix`, a missing variant resolves to the root mix composite
 // (older libraries keep showing art); without it, `out` is left on the
-// nonexistent variant path so the caller shows no art at all. Always fills
-// `out`.
+// nonexistent variant path so the caller shows no art at all. A disc of a
+// folder game (Home's recents and pins store the .m3u) also finds the variant
+// beside its folder. Always fills `out`.
 void ROM_displayArtPath(const char* rom_path, int art_type, bool fallback_to_mix,
 						char* out, size_t out_size);
 // ROM_mediaArtPath, existence-checked, with multi-disc fallback to
 // <parent>/.media/<containing-folder>.png. Returns whether the path in `out` exists.
 bool ROM_findArt(const char* rom_path, char* out, size_t out_size);
 // The game's screenshot for the views: .media/screenshot/<name>.png (scraped), else the root
-// .media/<name>.png (PortMaster's convention, hand-made art, older libraries). false = neither
-// exists; out then names the screenshot path, so a caller can still key a cache on it.
+// .media/<name>.png (PortMaster's convention, hand-made art, older libraries); for a disc of a
+// folder game, then the same two beside its folder. false = none exists; out then names the
+// screenshot path, so a caller can still key a cache on it.
 bool ROM_findScreenshot(const char* rom_path, char* out, size_t out_size);
+// The List's game picture for `art`, a GAME_LIST_ART_* value (config.h: 0 Screenshot, 1 Mix, 2 2D box art, 3 Wheel,
+// 4 3D box art; an int so utils.c stays free of config.h). A fitted picture found (true): Mix = .media/mix/<name>.png,
+// else the legacy root .media/<name>.png (older libraries, Ports); 2D box art = .media/boxart2d/; Wheel =
+// .media/wheel/; 3D box art = .media/boxart/; each also beside the folder for a folder game's disc. Otherwise ROM_findScreenshot's pick (false), as for Screenshot.
+bool ROM_findListArt(const char* rom_path, int art, char* out, size_t out_size);
 
 // Folder-named .m3u: /Roms/PSX/Game/disc1.bin -> /Roms/PSX/Game/Game.m3u.
 // Writes the candidate path to m3u_path; returns whether it exists.

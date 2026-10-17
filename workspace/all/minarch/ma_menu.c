@@ -4,14 +4,17 @@
 #include "utils.h"
 #include "arcade_names.h"
 #include "core_netplay.h"
+#include "gbalink.h"
 #include "ui_confirmdialog.h"
 #include "config.h"
 #include "ui_list.h"
 #include "ui_buttonhintbar.h"
 #include "ui_menubar.h"
 #include "ma_menu.h"
+#include "ma_present.h"
 #include "ma_frontend_opts.h"
 #include "ma_saves.h"
+#include "ma_save_paths.h"
 #include "ma_game.h"
 #include "ma_config.h"
 #include "ma_core.h"
@@ -105,8 +108,16 @@ void Menu_init(void) {
 
 	char emu_name[MAX_PATH]; // getEmuName requires MAX_PATH buffers
 	getEmuName(game.path, emu_name);
-	snprintf(menu.minui_dir, sizeof(menu.minui_dir), "%s/.minui/%s", SHARED_USERDATA_PATH, emu_name);
-	mkdir(menu.minui_dir, 0755);
+	// A netplay client on the host's save keeps its slot markers beside its
+	// isolated states (see Core_open), so NextUI never lists them as its own.
+	const char* netplay_saves = getenv("NETPLAY_SAVES_DIR");
+	if (netplay_saves && netplay_saves[0]) {
+		snprintf(menu.minui_dir, sizeof(menu.minui_dir), "%s/minui", netplay_saves);
+		mkdir_p(menu.minui_dir);
+	} else {
+		snprintf(menu.minui_dir, sizeof(menu.minui_dir), "%s/.minui/%s", SHARED_USERDATA_PATH, emu_name);
+		mkdir(menu.minui_dir, 0755);
+	}
 
 	// always sanitized/outer name, to keep main UI from having to inspect archives
 	snprintf(menu.slot_path, sizeof(menu.slot_path), "%s/%s.txt", menu.minui_dir, game.name);
@@ -144,14 +155,55 @@ void Menu_beforeSleep() {
 		}
 	} else {
 		State_autosave();
-		if (prefixMatch(SDCARD_PATH, game.path))
+		// a netplay client's autosave holds the host's data in /tmp: nothing
+		// NextUI should resume into
+		if (prefixMatch(SDCARD_PATH, game.path) && Menu_netplaySavesMode() != NETPLAY_SAVES_COPY)
 			putFile(AUTO_RESUME_PATH, game.path + strlen(SDCARD_PATH));
 	}
 
 	PWR_setCPUSpeed(CPU_SPEED_MENU);
 }
+NetplaySavesMode Menu_netplaySavesMode(void) {
+	return SavePaths_netplayMode(getenv("NETPLAY_ROLE"), getenv("NETPLAY_SAVES_DIR"));
+}
+// A session on the device's own save (link sessions, the lockstep host) writes
+// that save but never an auto-resume state, so the one from before the session
+// would resume the game to before it, and the next in-game save would then
+// undo the session (a trade, say). Drop it, and the markers that point at it,
+// as the session starts so a crash or flat battery mid-session is covered too.
+// Manual slots (0-8) are never touched.
+void Menu_dropAutoResumeForSession(void) {
+	if (Menu_netplaySavesMode() != NETPLAY_SAVES_REAL)
+		return;
+
+	char removed[MAX_PATH] = "";
+	char path[MAX_PATH];
+	// a truncated path could name a manual slot: leave the state alone then
+	if (State_getSlotPath(AUTO_RESUME_SLOT, path) != 0)
+		LOG_error("Netplay: auto-resume state path too long for %s, state kept\n", game.name);
+	else if (unlink(path) == 0)
+		strcat(removed, " state");
+	snprintf(path, sizeof(path), "%s/%s.%d.bmp", menu.minui_dir, game.name, AUTO_RESUME_SLOT);
+	if (unlink(path) == 0)
+		strcat(removed, " preview");
+	snprintf(path, sizeof(path), "%s/%s.%d.txt", menu.minui_dir, game.name, AUTO_RESUME_SLOT);
+	if (unlink(path) == 0)
+		strcat(removed, " disc-marker");
+	// the RESUME slot file only when it points at the auto slot just removed
+	if (exists(menu.slot_path) && getInt(menu.slot_path) == AUTO_RESUME_SLOT && unlink(menu.slot_path) == 0)
+		strcat(removed, " slot-file");
+	if (exists(AUTO_RESUME_PATH)) {
+		char marker[MAX_PATH];
+		getFile(AUTO_RESUME_PATH, marker, sizeof(marker));
+		if (SavePaths_autoResumeIsGame(marker, game.path, SDCARD_PATH) && unlink(AUTO_RESUME_PATH) == 0)
+			strcat(removed, " auto_resume.txt");
+	}
+	LOG_info("Netplay: session on the real save, dropped auto-resume for %s:%s\n", game.name, removed[0] ? removed : " (none)");
+}
 void Menu_afterSleep() {
-	unlink(AUTO_RESUME_PATH);
+	// a netplay client never writes it (Menu_beforeSleep), so never drops it
+	if (Menu_netplaySavesMode() != NETPLAY_SAVES_COPY)
+		unlink(AUTO_RESUME_PATH);
 	setOverclock(overclock);
 	EmuTime_reset();
 }
@@ -164,11 +216,24 @@ static int ach_compare_unlocked_first(const void* a, const void* b) {
 	return 0;
 }
 
+// Sort entry: `ach` is the first member, so the comparators below that take a
+// `const rc_client_achievement_t**` read it straight from an entry pointer.
+typedef struct {
+	const rc_client_achievement_t* ach;
+	uint32_t subset; // ordinal of the achievement's subset in the list
+} AchSortEntry;
+
 static int ach_compare_display_first(const void* a, const void* b) {
-	const rc_client_achievement_t* achA = *(const rc_client_achievement_t**)a;
-	const rc_client_achievement_t* achB = *(const rc_client_achievement_t**)b;
-	// Lower display order first
-	return (int)achA->id - (int)achB->id; // ID is a reasonable proxy for display order
+	const AchSortEntry* A = (const AchSortEntry*)a;
+	const AchSortEntry* B = (const AchSortEntry*)b;
+	// Display order is the server's list order (IDs follow creation, not order). rc_client keeps each
+	// subset's achievements in one array in that order and the list points into it, so within a
+	// subset the address is the position.
+	if (A->subset != B->subset)
+		return A->subset < B->subset ? -1 : 1;
+	if (A->ach != B->ach)
+		return (uintptr_t)A->ach < (uintptr_t)B->ach ? -1 : 1;
+	return 0;
 }
 
 static int ach_compare_display_last(const void* a, const void* b) {
@@ -218,7 +283,7 @@ static int ach_compare_type_desc(const void* a, const void* b) {
 	return -ach_compare_type_asc(a, b);
 }
 
-static void ach_sort_achievements(const rc_client_achievement_t** achievements, int count) {
+static void ach_sort_achievements(AchSortEntry* entries, int count) {
 	int sort_order = CFG_getRAAchievementSortOrder();
 	int (*compare)(const void*, const void*) = NULL;
 
@@ -262,7 +327,7 @@ static void ach_sort_achievements(const rc_client_achievement_t** achievements, 
 	}
 
 	if (compare && count > 1) {
-		qsort((void*)achievements, count, sizeof(rc_client_achievement_t*), compare);
+		qsort(entries, count, sizeof(AchSortEntry), compare);
 	}
 }
 
@@ -463,7 +528,10 @@ static int OptionAchievements_showDetail(MenuList* list, int i) {
 
 static int OptionAchievements_openMenu(MenuList* list, int i) {
 	if (!RA_isGameLoaded()) {
-		Menu_message("No game loaded for achievements", (char*[]){"B", "BACK", NULL});
+		if (RA_isGameUnknown())
+			Menu_message("RetroAchievements doesn't recognize\nthis game file. Use a supported\ndump listed on retroachievements.org.", (char*[]){"B", "BACK", NULL});
+		else
+			Menu_message("No game loaded for achievements", (char*[]){"B", "BACK", NULL});
 		return MENU_CALLBACK_NOP;
 	}
 
@@ -471,7 +539,7 @@ static int OptionAchievements_openMenu(MenuList* list, int i) {
 	RA_getAchievementSummary(&unlocked, &total);
 
 	if (total == 0) {
-		Menu_message("No achievements available for this game", (char*[]){"B", "BACK", NULL});
+		Menu_message("This game has no achievements yet", (char*[]){"B", "BACK", NULL});
 		return MENU_CALLBACK_NOP;
 	}
 
@@ -512,16 +580,25 @@ static int OptionAchievements_openMenu(MenuList* list, int i) {
 
 	// Create flattened array of all achievement pointers
 	const rc_client_achievement_t** all_achievements = calloc(total_achievements, sizeof(rc_client_achievement_t*));
+	AchSortEntry* sort_entries = calloc(total_achievements, sizeof(AchSortEntry));
 	int idx = 0;
+	uint32_t subset = 0;
 	for (uint32_t b = 0; b < ach_menu_list->num_buckets && idx < total_achievements; b++) {
 		const rc_client_achievement_bucket_t* bucket = &ach_menu_list->buckets[b];
+		// buckets come subset by subset (subset_id is 0 when the game has only one)
+		if (b > 0 && bucket->subset_id != ach_menu_list->buckets[b - 1].subset_id)
+			subset++;
 		for (uint32_t a = 0; a < bucket->num_achievements && idx < total_achievements; a++) {
-			all_achievements[idx++] = bucket->achievements[a];
+			sort_entries[idx].ach = bucket->achievements[a];
+			sort_entries[idx++].subset = subset;
 		}
 	}
 
 	// Sort achievements according to settings
-	ach_sort_achievements(all_achievements, total_achievements);
+	ach_sort_achievements(sort_entries, idx);
+	for (int j = 0; j < idx; j++)
+		all_achievements[j] = sort_entries[j].ach;
+	free(sort_entries);
 
 	// Custom menu loop with X (mute) and Y (filter) support
 	bool dirty = true;
@@ -896,8 +973,10 @@ void OptionAchievements_updateDesc(void) {
 			options_menu.items[6].desc = ach_desc_buffer;
 			return;
 		}
+		options_menu.items[6].desc = (char*)"No achievements yet";
+		return;
 	}
-	options_menu.items[6].desc = NULL;
+	options_menu.items[6].desc = RA_isGameUnknown() ? (char*)"Game not recognized" : NULL;
 }
 
 // Arcade zips without a map.txt alias get the title the launcher shows for them
@@ -915,7 +994,7 @@ static void getArcadeTitle(const char* path, char* name) {
 		char tag[MAX_PATH];
 		getEmuName(path, tag);
 		char table_path[MAX_PATH];
-		snprintf(table_path, sizeof(table_path), "%s/arcade/%s.txt", RES_PATH, tag);
+		snprintf(table_path, sizeof(table_path), "%s/arcade/%s.txt", RES_PATH, ArcadeNames_tableTag(tag));
 		ArcadeNames* names = ArcadeNames_load(table_path);
 		const char* title = ArcadeNames_get(names, baseName(path));
 		if (title && strcmp(title, ".") != 0)
@@ -1114,6 +1193,22 @@ int Menu_options(MenuList* list) {
 		if (defer_menu && !PAD_anyPressed())
 			defer_menu = false;
 
+		// an on_change handler may rebuild the rows (the Shaders page hides
+		// unused shader slots), so recount them after input and before this
+		// frame renders: a row past the new end has a NULL name, and drawing
+		// it with the old count crashed in the text truncation
+		for (count = 0; items[count].name; count++)
+			;
+		if (selected >= count)
+			selected = count - 1;
+		if (selected < 0)
+			selected = 0;
+		if (scroll > 0 && scroll + layout.items_per_page > count) {
+			scroll = count - layout.items_per_page;
+			if (scroll < 0)
+				scroll = 0;
+		}
+
 		if (dirty) {
 			GFX_clear(screen);
 
@@ -1229,7 +1324,8 @@ void Menu_updateState(void) {
 }
 
 typedef struct {
-	char* pixels;
+	char* pixels;		  // raw GL capture (ABGR8888), or NULL when surface is set
+	SDL_Surface* surface; // ready-to-save surface the worker owns, or NULL
 	char* path;
 	int w;
 	int h;
@@ -1248,7 +1344,8 @@ static SDL_Surface* rawCaptureToSurface(unsigned char* pixels, int w, int h, Uin
 int save_screenshot_thread(void* data) {
 	PWR_pinHelperThread(); // minarch_cpu_affinity=big -> SLOW set (no-op otherwise)
 	SaveImageArgs* args = (SaveImageArgs*)data;
-	SDL_Surface* converted = rawCaptureToSurface(args->pixels, args->w, args->h, SDL_PIXELFORMAT_ARGB8888);
+	SDL_Surface* converted = args->surface ? args->surface
+										   : rawCaptureToSurface(args->pixels, args->w, args->h, SDL_PIXELFORMAT_ARGB8888);
 
 	if (!converted) {
 		SDL_Log("Failed to convert screenshot surface: %s", SDL_GetError());
@@ -1272,6 +1369,7 @@ SDL_Thread* screenshotsavethread;
 // GL-captures the current frame and returns it as a converted SDL_Surface
 // (caller owns and must SDL_FreeSurface it), or NULL on capture failure.
 SDL_Surface* Menu_captureScreenSurface(Uint32 pixel_format) {
+	Present_stop();
 	int cw, ch;
 	unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
 	if (!pixels)
@@ -1283,6 +1381,7 @@ SDL_Surface* Menu_captureScreenSurface(Uint32 pixel_format) {
 // GL-captures the current frame and hands it to the background PNG-save
 // worker at `png_path`; waits for any previous save to finish first.
 void Menu_queueScreenshotSave(const char* png_path) {
+	Present_stop();
 	int cw, ch;
 	unsigned char* pixels = GFX_GL_screenCapture(&cw, &ch);
 	if (!pixels) {
@@ -1291,11 +1390,36 @@ void Menu_queueScreenshotSave(const char* png_path) {
 	}
 	SaveImageArgs* args = malloc(sizeof(SaveImageArgs));
 	args->pixels = pixels;
+	args->surface = NULL;
 	args->w = cw;
 	args->h = ch;
 	args->path = SDL_strdup(png_path);
-	SDL_WaitThread(screenshotsavethread, NULL);
+	Menu_waitScreenshotSave();
 	screenshotsavethread = SDL_CreateThread(save_screenshot_thread, "SaveScreenshotThread", args);
+}
+// Hands a copy of `surface` to the background PNG-save worker at `png_path`.
+// The in-game menu runs at a capped CPU clock, and a shader's scanlines or
+// LCD grid leave no flat runs for the encoder, so saving the full-screen slot
+// preview inline stalled Save for several seconds with a shader on.
+static void Menu_queueSurfaceSave(SDL_Surface* surface, const char* png_path) {
+	SDL_Surface* copy = SDL_ConvertSurface(surface, surface->format, 0);
+	if (!copy) {
+		SDL_Log("Failed to copy screenshot surface: %s", SDL_GetError());
+		return;
+	}
+	SaveImageArgs* args = malloc(sizeof(SaveImageArgs));
+	args->pixels = NULL;
+	args->surface = copy;
+	args->w = copy->w;
+	args->h = copy->h;
+	args->path = SDL_strdup(png_path);
+	Menu_waitScreenshotSave();
+	screenshotsavethread = SDL_CreateThread(save_screenshot_thread, "SaveScreenshotThread", args);
+}
+// Blocks until a queued PNG save has finished writing, so its file can be read.
+void Menu_waitScreenshotSave(void) {
+	SDL_WaitThread(screenshotsavethread, NULL);
+	screenshotsavethread = NULL;
 }
 void Menu_screenshot(void) {
 	char rom_name[MAX_PATH]; // getDisplayName/getAlias can write up to MAX_PATH
@@ -1374,9 +1498,7 @@ void Menu_saveState(void) {
 		Menu_queueScreenshotSave(menu.bmp_path);
 		newScreenshot = 0;
 	} else if (menu.bitmap) {
-		SDL_RWops* rw = SDL_RWFromFile(menu.bmp_path, "wb");
-		if (rw)
-			IMG_SavePNG_RW(menu.bitmap, rw, 1);
+		Menu_queueSurfaceSave(menu.bitmap, menu.bmp_path);
 	}
 
 	state_slot = menu.slot;
@@ -1468,6 +1590,7 @@ void Menu_undoLoadState(void) {
 typedef struct {
 	uint32_t start;
 	int seconds_left; // -1: no countdown
+	bool menu_down;	  // MENU pressed while the dialog is up
 } LeaveNetplayCtx;
 
 static void leaveNetplay_render(SDL_Surface* dst, void* data) {
@@ -1490,7 +1613,14 @@ static int leaveNetplay_handle(void* data) {
 	}
 	if (PAD_justPressed(BTN_A))
 		return 1;
-	if (PAD_justPressed(BTN_B) || PAD_justPressed(BTN_MENU))
+	if (PAD_justPressed(BTN_B))
+		return 0;
+	// MENU continues on its release: the game opens this dialog on a MENU
+	// release (ma_input.c), so closing on the press let that same press's
+	// release reopen it at once.
+	if (PAD_justPressed(BTN_MENU))
+		ctx->menu_down = true;
+	if (ctx->menu_down && PAD_justReleased(BTN_MENU))
 		return 0;
 	if (ctx->seconds_left >= 0) {
 		int left = CoreNetplay_leaveSecondsLeft(ctx->start, SDL_GetTicks());
@@ -1504,7 +1634,9 @@ static int leaveNetplay_handle(void* data) {
 
 // true = leave the session (and the game)
 static bool Menu_leaveNetplay(void) {
-	bool timed = CoreNetplay_isActive();
+	// A GBA link peer waits too (GBALink_setPaused), for as long as its pause
+	// lasts (GBALINK_PEER_PAUSE_MAX_MS / SIOLS_HOLD_MAX_US, 10 s past this grace).
+	bool timed = CoreNetplay_isActive() || GBALink_isConnected();
 	LeaveNetplayCtx ctx = {SDL_GetTicks(), timed ? CORE_NETPLAY_LEAVE_GRACE_MS / 1000 : -1};
 	UI_ModalOpts opts = {
 		.screen = screen,
@@ -1517,7 +1649,17 @@ static bool Menu_leaveNetplay(void) {
 	return UI_modalLoop(&opts) != 0;
 }
 
+void Menu_progressNotice(const char* title, const char* detail) {
+	Present_stop();
+	if (screen->w != DEVICE_WIDTH || screen->h != DEVICE_HEIGHT)
+		screen = GFX_resize(DEVICE_WIDTH, DEVICE_HEIGHT, DEVICE_PITCH);
+	GFX_clearShaders();
+	UI_renderConfirmDialogHints(screen, title, detail, (char*[]){NULL});
+	GFX_flip(screen);
+}
+
 void Menu_netplayNotice(const char* title, const char* subtitle, int hold_ms) {
+	Present_stop();
 	if (screen->w != DEVICE_WIDTH || screen->h != DEVICE_HEIGHT)
 		screen = GFX_resize(DEVICE_WIDTH, DEVICE_HEIGHT, DEVICE_PITCH);
 	GFX_clearShaders();
@@ -1529,6 +1671,10 @@ void Menu_netplayNotice(const char* title, const char* subtitle, int hold_ms) {
 }
 
 void Menu_loop(void) {
+	Present_stop(); // the menu draws (and reads the frame back) on this thread
+	RA_onMenuOpen();
+	// the slot previews below are read back from disk
+	Menu_waitScreenshotSave();
 	menu.bitmap = Menu_captureScreenSurface(SDL_PIXELFORMAT_ARGB8888);
 	SDL_Surface* backing = SDL_CreateRGBSurfaceWithFormat(0, DEVICE_WIDTH, DEVICE_HEIGHT, 32, SDL_PIXELFORMAT_ARGB8888);
 
@@ -1590,7 +1736,11 @@ void Menu_loop(void) {
 	//set vid.blit to null for menu drawing no need for blitrender drawing
 	GFX_clearShaders();
 	if (Multiplayer_isActive()) {
+		// The GBA link peer was paused before we got here (minarch.c) and is
+		// resumed after the menu's teardown; leaving resumes it first, so a
+		// real-cable peer stuck mid-transfer ends as on a pulled cable.
 		if (Menu_leaveNetplay()) {
+			GBALink_setPaused(false);
 			Netplay_quitAll(); // as the full menu's Quit: close the link cleanly
 			quit = 1;
 		}
@@ -1605,6 +1755,10 @@ void Menu_loop(void) {
 		if (Netplay_isConnected()) {
 			Netplay_pollWhilePaused();
 		}
+		// keep RA moving while paused (login retries, server replies). Not
+		// in the achievements page: its list points into the game data a
+		// finishing load would replace.
+		RA_idle();
 		int mp_active = Multiplayer_isActive();
 
 		if (PAD_justPressed(BTN_UP)) {

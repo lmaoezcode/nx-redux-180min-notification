@@ -17,8 +17,7 @@ typedef struct {
 void GridLayout_compute(float screen_w, float body_top, float body_h, int n, GridLayout* out);
 // The same with tiles width_mul times the spec shape's width (height unchanged).
 void GridLayout_computeWide(float screen_w, float body_top, float body_h, int n, float width_mul, GridLayout* out);
-// The same with the gap between tiles gap_mul times the spec's 14 dp (the Grid keeps its gap at the default scale's
-// px whatever the UI scale: NATIVE_SCALE / FIXED_SCALE).
+// The same with the gap between tiles gap_mul times the spec's 14 dp.
 void GridLayout_computeEx(float screen_w, float body_top, float body_h, int n, float width_mul, float gap_mul,
 						  GridLayout* out);
 // The same with tiles size_mul times the size they would take (both sides, and so their content: GridLayout_tileK).
@@ -42,6 +41,9 @@ typedef enum { GRID_MOVE_STAY,
 			   GRID_MOVE_EDGE_PREV,
 			   GRID_MOVE_EDGE_NEXT } GridMove;
 GridMove GridLayout_move(const GridLayout* g, int* index, GridDir dir);
+// Past an end (GRID_MOVE_EDGE_PREV / _NEXT) with no tab to switch to: the tile at the other end. Still: the last or the
+// first tile; sliding: the same row in the last or the first column (its top when that row is empty). 0 with no tiles.
+int GridLayout_wrap(const GridLayout* g, int index, GridMove edge);
 // The tile is in the top row (row 0; a sliding grid's column top). True with no tiles: the main menu's UP from the top of
 // a tab's content focuses the tab row.
 bool GridLayout_isTopRow(const GridLayout* g, int index);
@@ -72,6 +74,12 @@ float GridLayout_countSp(float spec_sp, float tile_k);
 // Consoles: the count line's top, gap under what's drawn (drawn_h) centred in the tile at tile_y..tile_y + tile_h
 // (any unit, the logo stays centred).
 float GridLayout_logoCountY(float tile_y, float tile_h, float drawn_h, float gap);
+// A console tile's logo (logo_h tall) and its "N games" line (count_h; 0: none) centred as one block, gap apart: the
+// logo's top and the count's top. GridLayout_logoBoxH: the logo's box height (box_h, the tile less its insets) less
+// the count's line, so the tallest logo keeps the block inside the box.
+void GridLayout_logoBlock(float tile_y, float tile_h, float logo_h, float gap, float count_h, float* logo_y,
+						  float* count_y);
+int GridLayout_logoBoxH(int box_h, int gap, int count_h);
 // Collections: a name of `lines` lines (clamped to 1..GRID_COLL_LINES) at line_h each, then gap, then the count line's
 // reserved count_h, centred in a tile_h tile as one group. The line is reserved whether or not it shows, so the name
 // sits at the same y plain and selected (px; tops from the tile's top).

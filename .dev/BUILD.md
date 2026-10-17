@@ -17,12 +17,12 @@ toolchain images and produce flashable release archives.
 `make all` builds both device platforms (`PLATFORMS = tg5040 tg5050`) and
 packages one release zip **per device variant** into `releases/`:
 
-| Zip suffix | Platform | Overlays / bg | OSD |
+| Zip suffix | Platform | Overlays | OSD |
 |---|---|---|---|
-| `-brick` | tg5040 | 768p / 1024 | 1024x768 |
-| `-brickpro` | tg5040 | 768p / 1024 | 1024x768 |
-| `-smartpro` | tg5040 | 720p / 1280 | 1280x720 |
-| `-smartpros` | tg5050 | 720p / 1280 | 1280x720 |
+| `-brick` | tg5040 | 768p | 1024x768 |
+| `-brickpro` | tg5040 | 768p | 1024x768 |
+| `-smartpro` | tg5040 | 720p | 1280x720 |
+| `-smartpros` | tg5050 | 720p | 1280x720 |
 
 Host requirements for device builds: Docker and `adb`. On the first build for
 a platform, its toolchain repo is cloned into `toolchains/` and the Docker
@@ -48,6 +48,24 @@ make deploy PLATFORM=tg5040   # resolves to that platform's first device
 `/mnt/SDCARD/MinUI.zip` and reboots — a full OTA-style update. Payloads are
 per-device: pushing the wrong device's zip leaves that unit without an OSD
 overlay, since each zip carries only its own.
+
+## Third-party prebuilts
+
+ffplay, rsync, SDL_drastic (NDS.pak) and tun.ko (tg5050) are not
+committed: `workspace/all/prebuilts/<name>.sh` builds each from pinned, sha256-checked source
+inside the toolchain image, into `workspace/all/prebuilts/output/<plat>/` (git-ignored, laid out
+like `build/`). `make common` copies them into the release and fails if one is missing. CI builds
+each in its own cached `build-prebuilt` job. Locally, once per checkout (and after changing a
+script or its patches):
+
+```sh
+make build-prebuilts PLATFORM=tg5040   # ffplay rsync sdl2-drastic
+make build-prebuilts PLATFORM=tg5050   # sdl2-drastic tun-ko
+make build-prebuilt PLATFORM=tg5040 PREBUILT=ffplay   # just one
+```
+
+The MiSans UI fonts aren't committed either: `make setup` fetches them from Xiaomi
+(`scripts/fetch-misans.py`, cached in `.cache/misans/`).
 
 ## Quick build (single component via Docker)
 
@@ -112,11 +130,20 @@ Component source lives in `workspace/all/<component>` (shared) and
   Makefiles include the fragment. New UI components are added to ui.mk, never
   to individual app Makefiles. There is no umbrella header — include exactly
   the `ui_*.h` you use.
-- Patched vendored projects (mupen64plus/GLideN64) are cloned at
-  **pinned commits** by the platform Makefiles and patched from
-  `workspace/all/other/`. Never regenerate a multi-file vendored patch with a
-  plain `git diff` — untracked new files vanish from it; splice per-file
-  sections instead. See `workspace/all/other/mupen64plus/README.md`.
+- Patched vendored projects (SDL_drastic) are cloned at **pinned commits** by
+  the platform Makefiles and patched from `workspace/all/other/`. Never
+  regenerate a multi-file vendored patch with a plain `git diff` — untracked
+  new files vanish from it; splice per-file sections instead.
+- N64 is the mupen64plus-next libretro core (`workspace/all/cores/mupen64plus_next/`,
+  patches in `workspace/all/cores/patches/mupen64plus_next/`, the built-in Rice
+  plugin's in `…/mupen64plus_next/rice/patches/`). Before `make build-core
+  CORE=mupen64plus_next`, run `workspace/all/cores/mupen64plus_next/fetch-deps.sh
+  <plat>` once (SDL2_net source; the toolchain image has no curl).
+- **Adding a device:** the device-marker cleanup
+  `rm -f $SDCARD_PATH/tg5040-brick tg5040-brickpro tg5040-smartpro tg5050-smartpros`
+  is hardcoded in three places (`workspace/tg5040/install/boot.sh`,
+  `workspace/tg5050/install/boot.sh`, `workspace/all/show2/boot-integration-example.sh`)
+  and must match the Makefile `DEVICES` list.
 
 ## IDE setup (clangd)
 

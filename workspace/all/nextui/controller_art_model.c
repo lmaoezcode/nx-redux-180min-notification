@@ -22,6 +22,7 @@ static const struct {
 	{"plus4", "c64"},
 	{"amiga", "c64"},
 	{"fbn", "c64"}, // Arcade: the Competition Pro is an arcade stick
+	{"dcx", "dc"},	// Dreamcast Lite
 };
 
 const PadTableRow* Pad_row(const char* id) {
@@ -56,11 +57,11 @@ PadSize Pad_fit(float aspect, float box_w, float box_h) {
 }
 
 PadSize Pad_rowBox(float h) {
-	return (PadSize){2.8f * h, 1.8f * h};
+	return (PadSize){3.0f * h, 1.95f * h};
 }
 
 PadSize Pad_stackBox(float h) {
-	return (PadSize){2.6f * h, 1.7f * h};
+	return (PadSize){2.8f * h, 1.85f * h};
 }
 
 float Pad_alpha(float d) {

@@ -111,7 +111,8 @@ static const char* rsync_bin(void) {
 #define WIZ_SYNC_TOTAL_TIMEOUT_MS 23000
 // rsync's own timeouts: the polite version of the two above, so a peer that
 // vanished fails with rsync's own error before anything gets SIGKILLed. Both are
-// supported by the bundled binary (skeleton/SYSTEM/shared/bin/rsync).
+// supported by the bundled binary (.system/shared/bin/rsync, built by
+// workspace/all/prebuilts/rsync.sh).
 #define WIZ_SYNC_IO_TIMEOUT_S 8
 #define WIZ_SYNC_CONNECT_TIMEOUT_S 4
 
@@ -872,7 +873,7 @@ static int wiz_pull_one(const char* host_ip, const char* stage_dir, const char* 
 	// under a whitelisted name gets `skipping non-regular file` out of rsync —
 	// which is the refusal we want, but rsync still exits 0, and the client would
 	// otherwise start a netplay session missing a save both sides think it has.
-	// Verified against the shipped rsync 3.2.0dev. Nothing pre-exists in the
+	// Verified against rsync 3.2.0dev and 3.4.1. Nothing pre-exists in the
 	// staging directory, so unlike a check against fetch_to this one cannot be
 	// satisfied by a stale file from an earlier session. Concatenation is safe
 	// here: the name passed wiz_sync_name_is_safe() before anything was spawned.

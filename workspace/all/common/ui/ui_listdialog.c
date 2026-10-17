@@ -8,10 +8,12 @@
 #include "defines.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static char dialog_title[128];
 static char dialog_status[128];
-static ListDialogItem dialog_items[LISTDIALOG_MAX_ITEMS];
+// a copy of the caller's rows, any number of them (LISTDIALOG_MAX_ITEMS is only a size for callers' own arrays)
+static ListDialogItem* dialog_items = NULL;
 static int dialog_count;
 static int dialog_selected;
 static int dialog_scroll;
@@ -23,14 +25,22 @@ void ListDialog_init(const char* title) {
 	dialog_count = 0;
 	dialog_selected = 0;
 	dialog_scroll = 0;
-	memset(dialog_items, 0, sizeof(dialog_items));
+	free(dialog_items);
+	dialog_items = NULL;
 }
 
 void ListDialog_setItems(ListDialogItem* items, int count) {
-	if (count > LISTDIALOG_MAX_ITEMS)
-		count = LISTDIALOG_MAX_ITEMS;
-	if (items != NULL && count > 0)
-		memcpy(dialog_items, items, count * sizeof(ListDialogItem));
+	if (items == NULL || count < 0)
+		count = 0;
+	if (count > 0) {
+		ListDialogItem* copy = realloc(dialog_items, (size_t)count * sizeof(ListDialogItem));
+		if (copy) {
+			dialog_items = copy;
+			memcpy(dialog_items, items, (size_t)count * sizeof(ListDialogItem));
+		} else {
+			count = 0; // out of memory: no rows
+		}
+	}
 	dialog_count = count;
 
 	if (dialog_selected >= dialog_count)
@@ -128,7 +138,7 @@ static void render_item(SDL_Surface* screen, ListLayout* layout,
 						   layout->item_h, layout->item_h / 3, UI_accentMapped(GFX_getScreen()->format));
 	}
 
-	int text_x = UI_listPillX() + NATIVE1(BUTTON_PADDING);
+	int text_x = UI_listPillX() + SCALE1(BUTTON_PADDING);
 	int text_y = y + (layout->item_h - TTF_FontHeight(font.small)) / 2;
 	int center_y_pos = y + layout->item_h / 2;
 	uint32_t icon_color = selected ? UI_onAccentMapped(GFX_getScreen()->format) : THEME_COLOR4;
@@ -141,7 +151,7 @@ static void render_item(SDL_Surface* screen, ListLayout* layout,
 
 	// Title text
 	SDL_Color text_color = UI_getListTextColor(selected);
-	int max_text_w = pill_width - NATIVE1(BUTTON_PADDING * 2) - extra;
+	int max_text_w = pill_width - SCALE1(BUTTON_PADDING * 2) - extra;
 	SDL_Surface* text_surf = GFX_renderText(font.small, truncated, text_color);
 	if (text_surf) {
 		SDL_Rect src = {0, 0, text_surf->w > max_text_w ? max_text_w : text_surf->w, text_surf->h};
@@ -151,7 +161,7 @@ static void render_item(SDL_Surface* screen, ListLayout* layout,
 	}
 
 	// Append icons or detail text (right-aligned)
-	int right_x = UI_listPillX() + pill_width - NATIVE1(BUTTON_PADDING) - suffix_w;
+	int right_x = UI_listPillX() + pill_width - SCALE1(BUTTON_PADDING) - suffix_w;
 
 	if (has_append) {
 		render_icons(screen, item->append_icons, right_x, center_y_pos, icon_color);
@@ -218,6 +228,8 @@ void ListDialog_render(SDL_Surface* screen) {
 }
 
 void ListDialog_quit(void) {
+	free(dialog_items);
+	dialog_items = NULL;
 	dialog_count = 0;
 	dialog_selected = 0;
 	dialog_scroll = 0;

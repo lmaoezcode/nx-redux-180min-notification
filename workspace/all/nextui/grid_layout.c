@@ -87,6 +87,23 @@ int GridLayout_index(const GridLayout* g, int col, int row) {
 	return i < g->n ? i : -1;
 }
 
+int GridLayout_wrap(const GridLayout* g, int index, GridMove edge) {
+	int n = g->n;
+	if (n <= 0)
+		return 0;
+	if (!g->sliding)
+		return edge == GRID_MOVE_EDGE_PREV ? n - 1 : 0;
+	if (index < 0)
+		index = 0;
+	if (index >= n)
+		index = n - 1;
+	int col, row;
+	GridLayout_cell(g, index, &col, &row);
+	int tc = edge == GRID_MOVE_EDGE_PREV ? GridLayout_columnCount(g) - 1 : 0;
+	int t = GridLayout_index(g, tc, row);
+	return t >= 0 ? t : GridLayout_index(g, tc, 0);
+}
+
 int GridLayout_columnCount(const GridLayout* g) {
 	return g->sliding ? (g->n + 1) / 2 : g->cols;
 }
@@ -109,7 +126,19 @@ float GridLayout_columnX(const GridLayout* g, int col, float offset) {
 void GridLayout_visibleColumns(const GridLayout* g, float offset, int* first, int* last) {
 	int c = GridLayout_columnCount(g);
 	int f = c, l = -1;
-	for (int i = 0; i < c; i++) {
+	// only the columns near the screen are tested (a 5000-game list has 2500): the range from the offset and the step,
+	// a column wider either side for float rounding, and the same test on each, so the result is exactly the full scan's
+	int lo = 0, hi = c - 1;
+	float step = g->tile_w + g->gap;
+	if (step > 0) {
+		float base = g->sliding ? GUTTER : g->frame_x0;
+		float a = floorf((offset - base - g->tile_w) / step) - 1, b = ceilf((offset - base + g->screen_w) / step) + 1;
+		if (a > lo) // NaN fails both tests: the full scan
+			lo = a < (float)c ? (int)a : c;
+		if (b < hi)
+			hi = b > -1.0f ? (int)b : -1;
+	}
+	for (int i = lo; i <= hi; i++) {
 		float x = GridLayout_columnX(g, i, offset);
 		if (x + g->tile_w > 0 && x < g->screen_w) {
 			if (i < f)
@@ -219,6 +248,17 @@ float GridLayout_countSp(float spec_sp, float tile_k) {
 
 float GridLayout_logoCountY(float tile_y, float tile_h, float drawn_h, float gap) {
 	return tile_y + tile_h / 2 + drawn_h / 2 + gap;
+}
+
+void GridLayout_logoBlock(float tile_y, float tile_h, float logo_h, float gap, float count_h, float* logo_y,
+						  float* count_y) {
+	float block_h = logo_h + (count_h > 0 ? gap + count_h : 0);
+	*logo_y = tile_y + (tile_h - block_h) / 2;
+	*count_y = *logo_y + logo_h + gap;
+}
+
+int GridLayout_logoBoxH(int box_h, int gap, int count_h) {
+	return count_h > 0 ? box_h - gap - count_h : box_h;
 }
 
 GridCollText GridLayout_collText(int tile_h, int lines, int line_h, int gap, int count_h) {

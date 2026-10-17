@@ -30,7 +30,7 @@ Copy "MinUI.zip" (without unzipping) to the root of the SD card containing your 
 
 Emulator and Tool paks are part of NX Redux itself now: they live in /.system/paks/ and update automatically with every update (MinUI.zip). There is nothing to copy by hand when updating.
 
-/Emus and /Tools are for your OWN paks (e.g. a community PSP.pak). Do NOT place a pak here with the same name as a shipped one: same-named paks are treated as NX Redux leftovers and are currently removed on every update. (Placing a same-named pak here to shadow the shipped one will become supported in a future release, once this transition cleanup is retired.)
+/Emus and /Tools are for your OWN paks (e.g. a community PSP.pak). A shipped pak always wins: a pak there with the same name as a shipped one is ignored, so give yours its own name.
 
 ----------------------------------------
 Shortcuts
@@ -131,3 +131,10 @@ Not simple enough for you (or maybe your kids)? NX Redux has a simple mode that 
 Advanced
 
 NX Redux can automatically run a user-authored shell script on boot. Just place a file named "auto.sh" in "/.userdata/<DEVICE>/". If you're on Windows, make sure your text editor uses Unix line-endings (eg. `\n`), these devices usually choke on Windows line-endings (eg. `\r\n`).
+
+----------------------------------------
+Licenses and credits
+
+NX Redux is free software under the GNU GPL v3. It bundles emulator cores, tools and libraries from other projects, each under its own license. Their license texts are in "/.system/licenses/", and each emulator's license is also next to its core in its pak folder.
+
+The interface font is MiSans by Xiaomi (font1.ttf, font1-arabic.ttf), used under the MiSans Font Intellectual Property License Agreement. The boot screen, the DraStic menus and N64 on-screen messages use Rounded M+ 1c (SIL Open Font License 1.1). Button prompts are from Kenney's Input Prompts pack (CC0). The Files tool is NextCommander (https://github.com/LoveRetro/NextCommander), a DinguxCommander fork.

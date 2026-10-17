@@ -31,7 +31,9 @@ static const struct {
 	{"SEGACD", "segacd"},
 	{"32X", "s32x"},
 	{"DC", "dc"},
+	{"DCX", "dcx"}, // Dreamcast Lite: the Dreamcast logo with a LITE badge
 	{"PS", "ps"},
+	{"PSX", "ps"}, // SwanStation, sharing the PlayStation logo
 	{"PSP", "psp"},
 	{"PCE", "pce"},
 	{"NGP", "ngp"},

@@ -16,6 +16,7 @@ int main(void) {
 	assert(is("Nintendo 3DS (3DS)", "3ds"));
 	assert(is("Xtra Games (EXTRAS)", "extras"));
 	assert(is("Amiga (PUAE)", "amiga"));
+	assert(is("Dreamcast Lite (DCX)", "dcx")); // its own logo: Dreamcast with a LITE badge
 	assert(is("Amstrad CPC (CPC)", "cpc"));
 	assert(is("Commodore 64 (C64)", "c64"));
 	assert(is("Commodore 128 (C128)", "c128"));
@@ -25,6 +26,7 @@ int main(void) {
 	assert(is("Microsoft MSX (MSX)", "msx"));
 	assert(is("Ms-Dos (DOS)", "dos"));
 	assert(is("Sony PlayStation (PS)", "ps"));
+	assert(is("Sony PlayStation (PSX)", "ps")); // SwanStation
 	assert(is("Sega Genesis (GPGX)", "md"));
 	assert(is("Sega Master System (GPGX)", "sms"));
 	assert(is("Sega Game Gear (GPGX)", "gg"));

@@ -110,6 +110,14 @@ jobs:
           for f in $(find workspace/all/cores/${{ matrix.core }} -type f 2>/dev/null | sort); do
             FILES="$FILES $f"
           done
+          # - the shared lockstep link code gpSP and mGBA compile in
+          case "${{ matrix.core }}" in
+            gpsp|mgba)
+              for f in $(find workspace/all/cores/sio_lockstep -type f 2>/dev/null | sort); do
+                FILES="$FILES $f"
+              done
+              ;;
+          esac
           HASH=$(cat $FILES | sha256sum | cut -d' ' -f1)
           echo "hash=$HASH" >> $GITHUB_OUTPUT
 
@@ -120,9 +128,11 @@ jobs:
           path: workspace/${{ matrix.toolchain }}/cores/output/
           key: core-${{ matrix.toolchain }}-${{ matrix.core }}-${{ steps.cache-key.outputs.hash }}
 
-      - name: Setup
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: make setup
+      - name: Fetch ${{ matrix.core }} build inputs
+        # a core's fetch-deps.sh downloads what its build needs but the
+        # toolchain image cannot fetch (mupen64plus_next: SDL2_net)
+        if: steps.cache.outputs.cache-hit != 'true' && hashFiles(format('workspace/all/cores/{0}/fetch-deps.sh', matrix.core)) != ''
+        run: sh workspace/all/cores/${{ matrix.core }}/fetch-deps.sh ${{ matrix.toolchain }}
 
       - name: Build ${{ matrix.core }} core
         if: steps.cache.outputs.cache-hit != 'true'
@@ -134,10 +144,46 @@ jobs:
           name: core-${{ matrix.toolchain }}-${{ matrix.core }}.zip
           path: workspace/${{ env.PLATFORM }}/cores/output/
 
+  build-prebuilt:
+    # Third-party binaries built from pinned source (workspace/all/prebuilts/);
+    # shared ones (ffplay, rsync) only with the tg5040 toolchain;
+    # tun.ko is tg5050-only (its kernel lacks CONFIG_TUN).
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { toolchain: tg5040, prebuilt: ffplay, inputs: "workspace/all/mediaplayer/include/ffplay/**" }
+          - { toolchain: tg5040, prebuilt: rsync, inputs: "workspace/all/prebuilts/rsync.sh" }
+          - { toolchain: tg5040, prebuilt: sdl2-drastic, inputs: "workspace/all/other/sdl2-drastic/**" }
+          - { toolchain: tg5050, prebuilt: sdl2-drastic, inputs: "workspace/all/other/sdl2-drastic/**" }
+          - { toolchain: tg5050, prebuilt: tun-ko, inputs: "workspace/tg5050/other/kernel/**" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5.0.0
+
+      - name: Restore cached prebuilt
+        id: cache
+        uses: actions/cache@v5
+        with:
+          path: workspace/all/prebuilts/output/
+          key: prebuilt-${{ matrix.toolchain }}-${{ matrix.prebuilt }}-${{ hashFiles(format('workspace/all/prebuilts/{0}.sh', matrix.prebuilt), matrix.inputs) }}
+
+      - name: Build ${{ matrix.prebuilt }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: make build-prebuilt PLATFORM=${{ matrix.toolchain }} PREBUILT=${{ matrix.prebuilt }}
+
+      - name: Upload prebuilt
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: prebuilt-${{ matrix.toolchain }}-${{ matrix.prebuilt }}
+          path: workspace/all/prebuilts/output/
+
   build:
     needs:
       - prepare
       - build-core
+      - build-prebuilt
     runs-on: ubuntu-24.04-arm
     env:
       BUILD_TAG: ${{ needs.prepare.outputs.next-tag }}
@@ -152,6 +198,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zipmerge
 
+      - name: Restore cached MiSans fonts
+        uses: actions/cache@v5
+        with:
+          path: .cache/misans/
+          key: misans-${{ hashFiles('scripts/fetch-misans.py') }}
+
       - name: Setup
         run: make setup
 
@@ -160,6 +212,13 @@ jobs:
           SS_DEV_ID: ${{ vars.SS_DEV_ID || secrets.SS_DEV_ID }}
           SS_DEV_PASSWORD: ${{ secrets.SS_DEV_PASSWORD }}
         run: sh scripts/gen-ss-credentials.sh
+
+      - name: Download prebuilts
+        uses: actions/download-artifact@v7.0.0
+        with:
+          path: workspace/all/prebuilts/output/
+          pattern: prebuilt-*
+          merge-multiple: true
 
       - name: Download Cores (tg5040)
         uses: actions/download-artifact@v7.0.0
@@ -241,4 +300,7 @@ jobs:
 
             More details available in https://nxredux.com/reference/release-notes/
             Select zip files that is relevant to your platform and extract it to your exFAT formatted SDCARD. Alternatively, you can update directly using the OTA update feature in the device.
+
+            **Coming from v1.x?** Back up your SD card before updating. A clean install is recommended: delete the hidden `.system` and `.tmp_update` folders from the card (keep `Roms`, `Saves`, `Bios` and `.userdata`, so your games, saves and settings stay), then extract this release as usual.
+
             If you have any questions, please open an issue in the repository.

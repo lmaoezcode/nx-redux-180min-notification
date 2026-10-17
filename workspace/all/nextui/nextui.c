@@ -3,6 +3,7 @@
 #include "defines.h"
 #include "shortcuts.h"
 #include "ui_menubar.h"
+#include "ui_buttonhintbar.h"
 #include "utils.h"
 #include <assert.h>
 #include <msettings.h>
@@ -36,6 +37,7 @@
 #include "ui_listview.h"
 #include "recents.h"
 #include "rowview.h"
+#include "artloader.h"
 #include "types.h"
 #include "cpu_policy.h"
 
@@ -84,6 +86,16 @@ static void Menu_init(void) {
 	Search_init();
 	GameList_init(simple_mode);
 }
+// The last frame drew its moving pictures as GPU sprites (the Consoles carousel, the Grid) and nothing into the
+// screen's body: the body is still black, and only the bars' rows changed.
+static bool sprites_last = false;
+// The last frame was a List with all its rows on the GPU (GameList_listBodyClear): its screen body is clear.
+static bool list_clear_last = false;
+// GFX_flipCount right after the last frame's flip. Another flip since (a blocking modal's own loop: the keyboard, a
+// dialog) drew over the screen, which voids both of the above.
+static unsigned last_frame_flip = 0;
+static SDL_Rect list_row_last; // that frame's marquee row in the body (h 0: none)
+
 static void Menu_quit(void) {
 	Recents_quit();
 	Shortcuts_quit();
@@ -93,6 +105,7 @@ static void Menu_quit(void) {
 	Search_quit();
 	InfoBand_quit();
 	UI_fadeCacheClear();
+	ArtLoader_quit(); // the worker first: it decodes into surfaces the caches below would otherwise never see freed
 	MenuArt_quit();
 	ControllerArt_quit();
 }
@@ -171,40 +184,13 @@ static SDL_Surface* cropBelowMenuBar(SDL_Surface* src, int bar_h) {
 	return out;
 }
 
-// A game list's title names its parent (LIST-LAYOUT §10.1): a console's list "Consoles | <console>", a
-// collection's "Collections | <name>", a folder deeper in a console "<console> | <folder>"; any other list (Tools,
-// a folder outside Roms) keeps its plain name.
+// A game list's title (LIST-LAYOUT §10.1): its own name alone (2026-10-06: no "Consoles |", "Collections |" or
+// "<console> |" before it), less the sorting prefix.
 static const char* listTitle(char* out, size_t size) {
 	char* name = top->name;
 	trimSortingMeta(&name);
-	if (prefixMatch(COLLECTIONS_PATH, top->path) && !exactMatch(COLLECTIONS_PATH, top->path))
-		return UI_pageTitle(out, size, "Collections", name);
-	size_t roms_len = strlen(ROMS_PATH);
-	if (strncmp(top->path, ROMS_PATH, roms_len) != 0 || top->path[roms_len] != '/') {
-		snprintf(out, size, "%s", name);
-		return out;
-	}
-	const char* seg = top->path + roms_len + 1;
-	const char* slash = strchr(seg, '/');
-	if (!slash)
-		return UI_pageTitle(out, size, "Consoles", name);
-
-	// deeper: the console is the stack's ROMS_PATH/<console> entry (its display name), else that path's name
-	char console_path[MAX_PATH];
-	snprintf(console_path, sizeof(console_path), "%.*s", (int)(slash - top->path), top->path);
-	char console_buf[MAX_PATH];
-	char* console = NULL;
-	for (int i = 0; i < stack->count && !console; i++) {
-		Directory* d = stack->items[i];
-		if (exactMatch(d->path, console_path))
-			console = d->name;
-	}
-	if (!console) {
-		getDisplayName(console_path, console_buf);
-		console = console_buf;
-	}
-	trimSortingMeta(&console);
-	return UI_pageTitle(out, size, console, name);
+	snprintf(out, size, "%s", name);
+	return out;
 }
 
 int main(int argc, char* argv[]) {
@@ -213,8 +199,11 @@ int main(int argc, char* argv[]) {
 	// launch. Stale = a previous launch never consumed it.
 	unlink(NETPLAY_LAUNCH_PATH);
 
-	if (autoResume())
+	if (autoResume()) {
+		// a Launch Options request left behind must not fire after the resumed game
+		unlink(PENDING_LAUNCH_PATH);
 		return 0; // nothing to do
+	}
 
 	// Lift the CPU cap before InitSettings, not just inside GFX_init: on tg5050
 	// the settings library alone is ~0.45s of the ~1s start-to-first-frame.
@@ -247,6 +236,15 @@ int main(int argc, char* argv[]) {
 	HomeStats_init();
 	CollCount_init();
 	Menu_init();
+	// Launch Options' Launch: the pak script left a ROM to start. This needs Menu_init (Recents, the tabs and
+	// loadLast's restored list, which Entry_open uses to save the return position) but nothing after it, so
+	// leave right here, the way the main loop's exit leaves for a launch: no Home_reset (it would queue worker
+	// jobs for a menu never shown), no game switcher, no first frame, and above all no backgrounded
+	// "gametimectl.elf stop_all", which could land after openRom's "start" and drop this game's play time.
+	if (pendingLaunch()) {
+		GFX_quit();
+		_exit(0);
+	}
 	Home_reset(); // Continue and the pins for this menu show (nextui restarts after every game); the stats are
 				  // requested when Home is first shown
 	bootStamp("after menu init");
@@ -287,6 +285,7 @@ int main(int argc, char* argv[]) {
 		unsigned long now = SDL_GetTicks();
 
 		PAD_poll();
+		GameSwitcher_setShown(currentScreen == SCREEN_GAMESWITCHER); // its input reads its layout (List or not)
 
 		if (PAD_anyPressed())
 			last_active_input = SDL_GetTicks();
@@ -336,6 +335,16 @@ int main(int argc, char* argv[]) {
 			}
 		}
 
+		// the menu's close guard (ContextMenu_isOpen stays true a few frames after it closed) ran out: one more frame, so
+		// what a List leaves off under the menu (its info band and arrows: renderInfoBand) comes back
+		{
+			static bool cm_was_open = false;
+			bool cm_now = ContextMenu_isOpen();
+			if (cm_was_open && !cm_now)
+				dirty = true;
+			cm_was_open = cm_now;
+		}
+
 		PWR_update(&dirty, &show_setting, NULL, NULL);
 
 		if (UI_statusBarChanged())
@@ -363,7 +372,7 @@ int main(int argc, char* argv[]) {
 			if (gsr.dirty)
 				dirty = true;
 			if (gsr.folderbgchanged)
-				folderbgchanged = 1;
+				requestBackgroundReupload();
 			if (gsr.startgame)
 				startgame = true;
 			if (gsr.screen != SCREEN_GAMESWITCHER) {
@@ -384,27 +393,31 @@ int main(int argc, char* argv[]) {
 			if (sr.dirty)
 				dirty = true;
 			if (sr.folderbgchanged)
-				folderbgchanged = 1;
+				requestBackgroundReupload();
 			if (sr.startgame)
 				startgame = true;
 			if (sr.screen != SCREEN_SEARCH) {
 				currentScreen = sr.screen;
-				if (currentScreen == SCREEN_GAMELIST)
+				if (currentScreen == SCREEN_GAMELIST) {
 					animationdirection = SLIDE_RIGHT;
+					// Search's per-row readyResume left the shared resume state on its last result; recompute it
+					// for the list's own selection, or the root's hint shows that result's X RESUME
+					readyResume(top->entries->count > 0 ? top->entries->items[top->selected] : NULL);
+				}
 			}
 		} else if (!ContextMenu_isOpen()) {
-			bool was_backdrop = RowView_paintsScreen();
+			bool was_backdrop = RowView_hasPicture();
 			GameListResult glr =
 				GameList_handleInput(now, currentScreen, show_setting, &dirty);
 			// into or out of a Backdrop game list: no page slide (the Menu transitions setting's), its picture fades
 			// in from / out to black instead; the new list or tab is rebuilt in its own layout at once
-			if ((glr.animdir == SLIDE_LEFT || glr.animdir == SLIDE_RIGHT) && (was_backdrop || RowView_paintsScreen()))
+			if ((glr.animdir == SLIDE_LEFT || glr.animdir == SLIDE_RIGHT) && (was_backdrop || RowView_hasPicture()))
 				glr.animdir = ANIM_NONE;
 			currentScreen = glr.screen;
 			if (glr.animdir != ANIM_NONE)
 				animationdirection = glr.animdir;
 			if (glr.folderbgchanged)
-				folderbgchanged = 1;
+				requestBackgroundReupload();
 		}
 
 		// TG5050: search keyboard may have triggered display recovery (new screen surface)
@@ -416,12 +429,18 @@ int main(int argc, char* argv[]) {
 			}
 		}
 
+		// The screen drawn: the Game Switcher's List (Layouts > Game Switcher layout: List) is a game list's List
+		// (gamelist.c draws it, GameSwitcher_listDir), so it renders as SCREEN_GAMELIST; its input stays the switcher's.
+		GameSwitcher_setShown(currentScreen == SCREEN_GAMESWITCHER);
+		bool sw_list = currentScreen == SCREEN_GAMESWITCHER && GameSwitcher_isList();
+		int drawScreen = sw_list ? SCREEN_GAMELIST : currentScreen;
+
 		// Keep redrawing while the selection pill glides to its new row, the
 		// tab underline to its new tab, a Grid slides or crossfades its lit tile,
 		// a Carousel/Backdrop row slides or crossfades its picture, or the content
 		// dims for (or lights up from) tab-row focus. Settled, nothing redraws.
-		if (currentScreen == SCREEN_GAMELIST && !ContextMenu_isOpen() &&
-			(GameList_pillAnimating() || MenuTabs_animating() || Home_animating() || GridView_animating() ||
+		if (drawScreen == SCREEN_GAMELIST && !ContextMenu_isOpen() &&
+			(GameList_pillAnimating() || GameList_artWaiting() || MenuTabs_animating() || Home_animating() || GridView_animating() ||
 			 RowView_animating() || MenuTabs_dimAnimating()))
 			dirty = true;
 
@@ -433,11 +452,17 @@ int main(int argc, char* argv[]) {
 
 		if (dirty) {
 			SDL_Surface* tmpOldScreen = NULL;
+			bool frame_animated = animationdirection != ANIM_NONE;
 			if (animationdirection != ANIM_NONE) {
 				tmpOldScreen = GFX_captureRendererToSurface();
 				if (tmpOldScreen)
 					SDL_SetSurfaceBlendMode(tmpOldScreen, SDL_BLENDMODE_BLEND);
 			}
+			// the GPU sprites are this frame's to add (the Consoles carousel, a game list's Grid, Carousel and Backdrop:
+			// RowView_beginSprites), those under the screen too (the Backdrop picture); a frame that adds none leaves
+			// none. After the capture above: the outgoing frame keeps its sprites.
+			PLAT_spritesClear();
+			PLAT_setScreenDim(0, 0, 255); // the tab-focus dim's rows, when it is the GPU's: this frame's to set again
 
 			if (lastScreen == SCREEN_GAME || lastScreen == SCREEN_OFF) {
 				GFX_clearLayers(LAYER_ALL);
@@ -449,55 +474,96 @@ int main(int argc, char* argv[]) {
 				if (lastScreen != SCREEN_GAMELIST)
 					GFX_clearLayers(LAYER_THUMBNAIL);
 				GFX_clearLayers(LAYER_SCROLLTEXT);
-				GFX_clearLayers(LAYER_OVERLAY);
+				// a List frame keeps its info band on the overlay layer while it is unchanged (it clears and redraws
+				// it itself on a change): only a page change, a transition or another view starts it over
+				if (!(drawScreen == SCREEN_GAMELIST && lastScreen == SCREEN_GAMELIST && !startgame &&
+					  animationdirection == ANIM_NONE && GameList_keepsOverlay()))
+					GFX_clearLayers(LAYER_OVERLAY);
 			}
-			// a Backdrop game row's picture paints every pixel: no clear under it
-			if (!(currentScreen == SCREEN_GAMELIST && !startgame && RowView_paintsScreen()))
-				GFX_clear(screen);
+			// a Backdrop game row's picture drawn the software way paints every pixel: no clear under it. After a sprite
+			// frame the screen's body still holds what that frame left there (it drew it nowhere but on the GPU; a
+			// Backdrop's transparent over its picture, else black, and the row refills it when another kind of frame
+			// left it): only the bars' rows need clearing. Only when this frame is a Grid, Carousel or Backdrop one too
+			// (they fill their body themselves): any other (a List, Home's, Search) is drawn over a clear body, or the
+			// sprite frame's black stays in it, over the art under the screen (Home's List back from Consoles).
+			bool screen_clear = false; // the whole screen is clear (0,0,0,0) here: the top fade can be written, not blended
+			if (!(drawScreen == SCREEN_GAMELIST && !startgame && RowView_paintsScreen())) {
+				bool body_kept = sprites_last && GFX_flipCount() == last_frame_flip && drawScreen == SCREEN_GAMELIST &&
+								 !startgame &&
+								 (GridView_active() || RowView_active());
+				if (body_kept && screen->h > 2 * BAR_HEIGHT) {
+					SDL_FillRect(screen, &(SDL_Rect){0, 0, screen->w, BAR_HEIGHT}, 0);
+					SDL_FillRect(screen, &(SDL_Rect){0, screen->h - BAR_HEIGHT, screen->w, BAR_HEIGHT}, 0);
+				} else if (list_clear_last && GFX_flipCount() == last_frame_flip && drawScreen == SCREEN_GAMELIST &&
+						   lastScreen == SCREEN_GAMELIST &&
+						   animationdirection == ANIM_NONE && !startgame) {
+					// the last frame was a List that left its body clear: only the header with its fade and the hint
+					// bar's rows hold anything to clear
+					int top_h = BAR_HEIGHT + NX_DP(48), hint_top = UI_buttonHintBarTop(screen->h);
+					SDL_FillRect(screen, &(SDL_Rect){0, 0, screen->w, top_h}, 0);
+					SDL_FillRect(screen, &(SDL_Rect){0, hint_top, screen->w, screen->h - hint_top}, 0);
+					if (list_row_last.h > 0) // and its marquee row
+						SDL_FillRect(screen, &list_row_last, 0);
+					screen_clear = true;
+				} else {
+					GFX_clear(screen);
+					screen_clear = true;
+				}
+			}
 
 			// A Backdrop game list's picture: the bottom-most layer, under the band and the bar. With it on screen
 			// the eased top band is skipped and the bar's text gets the dark "over art" shadows. (Never at the root:
 			// a main-menu tab has no picture.)
-			bool over_art = currentScreen == SCREEN_GAMELIST && !startgame && RowView_renderPicture(screen);
+			bool over_art = drawScreen == SCREEN_GAMELIST && !startgame && RowView_renderPicture(screen);
 
 			// render top menu bar
 			char list_title[MAX_PATH * 2];
 			const char* menu_title;
 			if (currentScreen == SCREEN_GAMESWITCHER)
-				menu_title = GameSwitcher_getSelectedName();
+				menu_title = sw_list ? "Recent" : NULL; // Full screen draws the game's name itself, larger
 			else if (currentScreen == SCREEN_SEARCH)
 				menu_title = "Search";
+			else if (!CFG_getPageTitle())
+				menu_title = NULL; // Layouts > Page title: Hide (no tab row either, below); the status icons stay
 			else if (stack->count > 1)
 				menu_title = listTitle(list_title, sizeof(list_title));
+			else if (MenuTabs_count() <= 1)
+				menu_title = "NX Redux"; // a lone tab draws no row (MenuTabs_renderRow): the bar shows the name instead
 			else
 				menu_title = NULL; // the root draws the tab row in the bar instead
 			int ow;
 			if (currentScreen == SCREEN_GAMELIST || currentScreen == SCREEN_GAMESWITCHER) {
 				// an eased fade from the top edge replaces the bar's flat scrim: over the art, under the text
 				int bar_h = BAR_HEIGHT;
-				int fade_h = currentScreen == SCREEN_GAMESWITCHER
-								 ? bar_h + (font.tiny ? TTF_FontHeight(font.tiny) : 0) + NX_DP(64) // 64 dp below the subtitle
+				int fade_h = drawScreen == SCREEN_GAMESWITCHER
+								 ? GameSwitcher_headerBottom() + NX_DP(64) // 64 dp below the subtitle
 								 : bar_h + NX_DP(48);
-				// Home shows it only while its page is scrolled
-				bool home = currentScreen == SCREEN_GAMELIST && Home_active();
+				// Home shows it only while its page is scrolled (its List: always, as every List)
+				bool home = drawScreen == SCREEN_GAMELIST && Home_active() && !Home_isList();
 				SDL_Surface* fade = !over_art && (!home || Home_scrolled())
 										? UI_easedFadeSurface(screen->w, fade_h, 0.9f, 3.5f, true)
 										: NULL;
 				// cached: blit right away. Home draws the part below the strip itself, over its page; a Grid screen
 				// paints its body plain black, so the part below the strip would only be painted over.
-				bool strip_only = home || (currentScreen == SCREEN_GAMELIST && GridView_active());
-				if (fade)
+				// Carousel and Backdrop: their body is plain black, or the picture with no fade (over_art), or a sprite
+				// frame's body that must hold nothing but what the row left there.
+				bool strip_only =
+					home || (drawScreen == SCREEN_GAMELIST && (GridView_active() || RowView_active()));
+				if (fade && screen_clear && !over_art) // nothing drawn under it yet: the fade's own pixels
+					UI_fillFade(fade, strip_only ? &(SDL_Rect){0, 0, screen->w, bar_h} : NULL, screen, 0, 0);
+				else if (fade)
 					UI_blitFade(fade, strip_only ? &(SDL_Rect){0, 0, screen->w, bar_h} : NULL, screen, 0, 0);
 				// a game list's title starts where its content does: the List rows' 14 dp inset, the 24 dp gutter of
 				// Grid, Carousel and Backdrop (LIST-LAYOUT §10.1)
-				int title_x = currentScreen == SCREEN_GAMELIST && GameList_currentStyle() != MENU_STYLE_LIST
-								  ? NX_NATIVE_DP(NX_MENU_GUTTER_DP)
+				int title_x = currentScreen == SCREEN_GAMELIST &&
+									  (GameList_currentStyle() != MENU_STYLE_LIST || stack->count == 1)
+								  ? NX_DP(NX_MENU_GUTTER_DP) // the root's: where the tab row starts
 								  : -1;
 				ow = UI_renderMenuBarAt(screen, menu_title, NULL, title_x, false, over_art);
 			} else {
 				ow = UI_renderMenuBar(screen, menu_title);
 			}
-			if (currentScreen == SCREEN_GAMELIST && stack->count == 1)
+			if (currentScreen == SCREEN_GAMELIST && stack->count == 1 && CFG_getPageTitle())
 				MenuTabs_renderRow(screen, ow); // the root has no picture: the plain tab row
 
 			// capture menu bar for fixed overlay during animation
@@ -512,10 +578,11 @@ int main(int argc, char* argv[]) {
 				GFX_clearLayers(LAYER_ALL);
 				GFX_clear(screen);
 				GFX_flipHidden();
-			} else if (currentScreen == SCREEN_GAMESWITCHER) {
-				GameSwitcher_render(lastScreen, blackBG, gsanimdir);
+			} else if (drawScreen == SCREEN_GAMESWITCHER) {
+				GameSwitcher_render(lastScreen, blackBG, gsanimdir, ow);
 				lastScreen = SCREEN_GAMESWITCHER;
 			} else {
+				GameSwitcher_readyList(); // the switcher's List: its selection's resume state (a no-op otherwise)
 				GameList_render(screen, lastScreen, show_setting, blackBG);
 				RowView_renderExit(screen); // B's fade out of a Backdrop game list: the whole frame toward black
 				lastScreen = SCREEN_GAMELIST;
@@ -527,7 +594,7 @@ int main(int argc, char* argv[]) {
 						if (blackBG)
 							GFX_drawOnLayer(blackBG, 0, 0, screen->w, screen->h, 1.0f, 0,
 											LAYER_BACKGROUND);
-						folderbgchanged = 1;
+						requestBackgroundReupload();
 					}
 					GFX_clearLayers(LAYER_TRANSITION);
 					GFX_clearLayers(LAYER_THUMBNAIL);
@@ -630,7 +697,44 @@ int main(int argc, char* argv[]) {
 			}
 			if (!startgame) {								  // dont flip if game gonna start
 				unsigned long work_ms = SDL_GetTicks() - now; // this frame's input and render
+				// The Consoles carousel, a game list's Grid, Carousel or Backdrop drew its pictures as GPU sprites and
+				// nothing into the screen's body: only the bars' rows need uploading. Not on the first such frame (the
+				// texture's body may hold the last screen), nor one whose row filled the body anew (another kind of
+				// sprite frame left it otherwise), nor under a context menu or a transition (both draw over the body).
+				bool sprites_now = RowView_takeSpritesUsed() && drawScreen == SCREEN_GAMELIST;
+				bool body_changed = RowView_takeBodyChanged();
+				int bar_ys[2] = {0, screen->h - BAR_HEIGHT}, bar_hs[2] = {BAR_HEIGHT, BAR_HEIGHT};
+				if (sprites_now && sprites_last && GFX_flipCount() == last_frame_flip && !body_changed && !frame_animated &&
+					!ContextMenu_isOpen())
+					PLAT_setUploadBands(bar_ys, bar_hs, 2);
+				// A List with all its rows on the GPU, after one: the body between the header's fade and the hint bar
+				// is clear in both (the rows, pill and art are sprites, the band its layer): only the header with its
+				// fade and the hint bar's rows go up, not a hash of the whole screen.
+				SDL_Rect list_row = {0, 0, 0, 0};
+				bool list_clear_now =
+					drawScreen == SCREEN_GAMELIST && !sprites_now && GameList_listBodyClear(&list_row);
+				if (list_clear_now && list_clear_last && GFX_flipCount() == last_frame_flip && !frame_animated &&
+					!ContextMenu_isOpen()) {
+					// the header with its fade, the hint bar, and the marquee row where it was and where it is
+					int top_h = BAR_HEIGHT + NX_DP(48);
+					int hint_top = UI_buttonHintBarTop(screen->h);
+					int ys[4] = {0, hint_top}, hs[4] = {top_h, screen->h - hint_top}, n = 2;
+					if (list_row_last.h > 0)
+						ys[n] = list_row_last.y, hs[n++] = list_row_last.h;
+					if (list_row.h > 0 && !(list_row_last.h > 0 && list_row.y == list_row_last.y))
+						ys[n] = list_row.y, hs[n++] = list_row.h;
+					PLAT_setUploadBands(ys, hs, n);
+				}
+				list_clear_last = list_clear_now && !frame_animated && !ContextMenu_isOpen();
+				list_row_last = list_row;
+				// a Backdrop sprite frame's body is clear (its picture shows through from under the screen): only the
+				// bars' rows of the screen texture are composited, not a full-screen blend of clear pixels
+				if (sprites_now && !frame_animated && !ContextMenu_isOpen() && RowView_hasPicture() &&
+					RowView_gameSprites())
+					PLAT_setScreenDrawBands(bar_ys, bar_hs, 2);
+				sprites_last = sprites_now;
 				GFX_flip(screen);
+				last_frame_flip = GFX_flipCount();
 				static bool first_frame_stamped = false;
 				if (!first_frame_stamped) {
 					first_frame_stamped = true;
@@ -641,7 +745,7 @@ int main(int argc, char* argv[]) {
 				// build ahead in what's left of the frame, assuming the next costs what this one did: a held D-pad
 				// redraws every frame, and this is what lands its steps on cached items. No redraw: the next frame
 				// picks them up.
-				if (currentScreen == SCREEN_GAMELIST && !ContextMenu_isOpen() && work_ms + PREFETCH_MARGIN_MS < 16)
+				if (drawScreen == SCREEN_GAMELIST && !ContextMenu_isOpen() && work_ms + PREFETCH_MARGIN_MS < 16)
 					GameList_prefetchIdle(SDL_GetTicks() + (Uint32)(16 - PREFETCH_MARGIN_MS - work_ms));
 			}
 
@@ -649,7 +753,7 @@ int main(int argc, char* argv[]) {
 				SDL_FreeSurface(tmpOldScreen);
 
 			dirty = false;
-		} else if (folderbgchanged || thumbchanged ||
+		} else if (backgroundLayerPending() ||
 				   (GameList_scrollBusy() && !ContextMenu_isOpen()) ||
 				   (currentScreen == SCREEN_SEARCH &&
 					UI_listViewMarqueeBusy(Search_view()))) {
@@ -662,7 +766,7 @@ int main(int argc, char* argv[]) {
 			// scrollBusy *term* too, not just the tick: needs_scroll stays
 			// latched while the menu is open, so an otherwise-idle loop must
 			// fall through to the sleeping path below instead of spinning here.
-			if (currentScreen != SCREEN_GAMESWITCHER &&
+			if (drawScreen != SCREEN_GAMESWITCHER &&
 				currentScreen != SCREEN_SEARCH && !ContextMenu_isOpen()) {
 				GameList_scrollTickIdle();
 			} else if (currentScreen == SCREEN_SEARCH &&
@@ -689,7 +793,7 @@ int main(int argc, char* argv[]) {
 				// build ahead what the view's next move draws first, in part of the slot (no redraw: the next real
 				// frame picks it up). Done (or nothing to build), it returns at once; while more remains the 16 ms
 				// cadence holds, and only then does the deep-idle one take over.
-				bool prefetching = currentScreen == SCREEN_GAMELIST && !ContextMenu_isOpen() &&
+				bool prefetching = drawScreen == SCREEN_GAMELIST && !ContextMenu_isOpen() &&
 								   GameList_prefetchIdle((Uint32)now + PREFETCH_IDLE_MS);
 				unsigned long elapsed = SDL_GetTicks() - now;
 				int frame_target =

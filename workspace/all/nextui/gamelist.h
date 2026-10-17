@@ -29,6 +29,10 @@ void GameList_render(SDL_Surface* screen, int lastScreen,
 // thumbnail layer). GameList_render draws the band itself (inside the tab-focus dim); the main loop calls this
 // after a page slide, which clears that layer. Draws nothing while the content is dimmed or the context menu is open.
 void GameList_renderInfoLayer(void);
+// The main-menu tab whose look the current list takes (MenuTabId), or -1 for a game list (or folder): the current tab
+// at the root, or the hidden tab whose list the context menu pushed over it (launcher.c pushTabOverTab), which keeps
+// its own tab's layout, slots and tiles.
+int GameList_lookTab(void);
 // The current screen's main menu style (MENU_STYLE_*): a root tab's Layouts row, or the game lists' row. Home →
 // MENU_STYLE_LIST (Home draws itself).
 int GameList_currentStyle(void);
@@ -45,9 +49,18 @@ int GameList_textX(void);
 // Directory built before it reaches the stack (root = a tab's own list at stack[0]).
 int GameList_rowCount(void);
 int GameList_rowCountAt(bool root);
+// The main menu's List rows with the first row's top at list_top (px): Home's List (under its stats strip).
+int GameList_rowCountFrom(int list_top);
 // Scroll-text (marquee) state, driven by the main loop's idle path.
-bool GameList_scrollBusy(void);		   // still needs animation/render ticks
-bool GameList_pillAnimating(void);	   // selection pill mid-glide, keep redrawing
+bool GameList_scrollBusy(void);	   // still needs animation/render ticks
+bool GameList_pillAnimating(void); // selection pill mid-glide, keep redrawing
+bool GameList_artWaiting(void);	   // the List's Consoles art still decoding: keep redrawing until it lands
+// a List frame keeps LAYER_OVERLAY as it drew it (its info band redraws only on a change): nextui.c doesn't clear it
+bool GameList_keepsOverlay(void);
+// the last GameList_render was a List with every row on the GPU: the screen holds nothing between the header (and its
+// fade) and the hint bar but, when *row has a height, the selected row's marquee there, so only those rows need
+// clearing and uploading while that holds (nextui.c)
+bool GameList_listBodyClear(SDL_Rect* row);
 bool GameList_scrollIsScrolling(void); // actively scrolling right now
 void GameList_scrollTickIdle(void);	   // advance marquee on non-dirty frames
 void GameList_clearScroll(void);	   // drop cached scroll state (screen switch/exit)

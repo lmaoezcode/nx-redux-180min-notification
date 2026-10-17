@@ -3,7 +3,8 @@
 
 #include <stdbool.h>
 
-// Fixed tab order. Home (the SDCARD_PATH listing: pins) is always visible.
+// Fixed tab order. Home (the SDCARD_PATH listing: pins) is first; it can be hidden (Layouts > Home tab), but stays
+// when no other tab shows.
 typedef enum { MENU_TAB_HOME = 0,
 			   MENU_TAB_CONSOLES,
 			   MENU_TAB_COLLECTIONS,
@@ -11,6 +12,7 @@ typedef enum { MENU_TAB_HOME = 0,
 			   MENU_TAB_COUNT } MenuTabId;
 
 typedef struct {
+	bool hide_home; // Layouts > Home tab hidden (false keeps it, so a zeroed struct still shows Home)
 	bool show_consoles, has_consoles;
 	bool show_collections, has_collections;
 	bool show_tools, has_tools;
@@ -24,7 +26,7 @@ typedef struct {
 	const char* sys_tools;	 // PAKS_PATH "/Tools"
 } MenuTabPaths;
 
-// Visible tabs in fixed order into out; returns the count (>= 1: Home is always first).
+// Visible tabs in fixed order into out; returns the count (>= 1: Home when nothing else shows).
 int MenuTabs_visible(const MenuTabInputs* in, MenuTabId out[MENU_TAB_COUNT]);
 // index + delta, wrapping over count (count <= 0 returns 0).
 int MenuTabs_wrap(int count, int index, int delta);
@@ -33,6 +35,9 @@ int MenuTabs_indexOf(const MenuTabId* tabs, int count, MenuTabId id);
 // Index for `current` in the new visible list: its own index if still visible, else the first
 // later tab in fixed order, else the last tab.
 int MenuTabs_resolve(const MenuTabId* tabs, int count, MenuTabId current);
+// path is base or lies below it: base followed by '/' or the end, so "Roms/GBA2" is not under "Roms/GBA" (a base
+// ending in '/' needs only the prefix). False for a NULL or empty base.
+bool MenuTabs_underPath(const char* path, const char* base);
 // The tab a saved/launched path belongs to (Home when nothing else claims it).
 MenuTabId MenuTabs_forPath(const char* path, const MenuTabPaths* paths);
 const char* MenuTabs_label(MenuTabId id); // "Home", "Consoles", "Collections", "Tools"
@@ -46,14 +51,15 @@ int MenuTabs_scrollOffset(int content_w, int view_w, int cur_x, int cur_w, int m
 // The tab to open at boot. The saved tab (saved_valid: MENU_TAB_PATH parsed) wins when it is
 // visible and either there is no saved path or the path belongs to it (saved_owns_path, e.g. a
 // Search launch from Home saves an unpinned ROM, which does not). Otherwise the path's tab
-// (path_tab = MenuTabs_forPath), then Home.
+// (path_tab = MenuTabs_forPath), then the first visible tab (Home unless it is hidden).
 MenuTabId MenuTabs_pickInitial(const MenuTabId* tabs, int count, bool saved_valid, MenuTabId saved,
 							   bool has_path, MenuTabId path_tab, bool saved_owns_path);
 
-// A tab root's selection window for a list of `count` rows shown `rows` at a time (rows >= 1). A selection that
-// doesn't fit the list (out of range, or outside a stale window) resets to the top, as a fresh root does; a window
-// whose size isn't min(count, rows) -- the list or the row count changed since it was set -- is rebuilt around
-// the selection, kept visible and inside the list. An empty list ends up 0/0/0.
+// A tab root's selection window for a list of `count` rows shown `rows` at a time (rows >= 1). A selection out of
+// range resets to the top, as a fresh root does. Otherwise the selection is kept: a window that doesn't fit the list
+// (past its end, or not holding the selection) or whose size isn't min(count, rows) -- the list or the row count
+// changed since it was set -- is rebuilt around the selection, kept visible and inside the list. An empty list ends
+// up 0/0/0.
 void MenuTabs_clampWindow(int count, int rows, int* selected, int* start, int* end);
 
 // Parked tab roots (T1-1): a tab switch parks the outgoing tab's root Directory and takes the incoming one's, so

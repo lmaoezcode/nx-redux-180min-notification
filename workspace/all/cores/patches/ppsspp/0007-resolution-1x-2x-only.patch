@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # Offer only 1x and 2x Rendering Resolution: 3x and higher exceed the Brick (1024x768)
 # and Smart Pro S (1280x720) panels, so they only cost speed and heat (Tekken 6 at 3x
 # throttled the Smart Pro S). minarch maps a saved value no longer listed to 1x.

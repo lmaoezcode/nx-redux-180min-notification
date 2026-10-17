@@ -25,13 +25,18 @@
 # must not have it written back over its own file. Both are solved the same way
 # the Dreamcast pak already does it: the host serves its save read-only and the
 # client plays on a copy in an isolated dir (NETPLAY_SAVES_DIR, read by
-# minarch's Core_open). GB/GBC/GBA are LINK-CABLE cores (gambatte/gpsp) and are
+# minarch's Core_open). GB/GBC/GBA are LINK-CABLE cores (gambatte/gpsp/mgba) and are
 # excluded on purpose - link play (Pokemon trading) needs DISTINCT saves.
 #
 # The wizard's transfer only accepts filenames matching [A-Za-z0-9._-], but a
 # libretro .srm is named after the ROM (spaces, brackets), so the real file is
 # staged under a fixed safe name to be served, and the client renames the fetch
 # back to what minarch expects.
+#
+# Core check: every pak tells the wizard its core and folder (--caps
+# core=<EMU_EXE>,tag=<EMU_TAG>). The wizards trade it in their handshake and
+# refuse a pair running different cores, with the reason on both screens, so
+# this script never has to second-guess a successful wizard.
 #
 # NETPLAY_LAUNCH_FLAG / NETPLAY_SESSION_FILE and the save dirs are overridable
 # for tests only.
@@ -47,8 +52,26 @@ if [ -f "$NETPLAY_LAUNCH_FLAG" ]; then
 
 	# Lockstep cores sync saves; the two link-cable cores never do.
 	case "${EMU_EXE:-}" in
-		gambatte|gpsp) NETPLAY_SYNC_SAVES=0 ;;
-		*)             NETPLAY_SYNC_SAVES=1 ;;
+		gambatte|gpsp|mgba) NETPLAY_SYNC_SAVES=0 ;;
+		*)                  NETPLAY_SYNC_SAVES=1 ;;
+	esac
+	# mGBA's link is the real cable, which runs only over the USB Cable.
+	NP_WIZ_MODE_ARGS=""
+	[ "${EMU_EXE:-}" = "mgba" ] && NP_WIZ_MODE_ARGS="--modes usb"
+	# Tell the peer which emulator core (and pak folder) we run. Two different
+	# cores never sync (MD's PicoDrive vs GPGX's Genesis Plus GX: "State size
+	# mismatch"; gpSP's link vs mGBA's real cable: different protocols), so the
+	# wizard refuses such a pair in its handshake and names the other side's
+	# core and folder on both screens. Values outside the wizard's caps charset
+	# (a custom pak named with spaces, say) or too long for it skip the check.
+	NP_WIZ_CAPS_ARGS=""
+	NP_CAPS="core=${EMU_EXE:-},tag=${EMU_TAG:-}"
+	case "${EMU_EXE:-}" in
+		"" | *[!A-Za-z0-9._-]*) ;;
+		*) case "${EMU_TAG:-}" in
+			"" | *[!A-Za-z0-9._-]*) ;;
+			*) if [ ${#NP_CAPS} -lt 64 ]; then NP_WIZ_CAPS_ARGS="--caps $NP_CAPS"; fi ;;
+		esac ;;
 	esac
 
 	# Stage the local save under a safe name so it can be served if we host, and
@@ -71,7 +94,7 @@ if [ -f "$NETPLAY_LAUNCH_FLAG" ]; then
 	fi
 
 	netplay.elf --game "$NETPLAY_GAME_NAME" --session-file "$NETPLAY_SESSION_FILE" \
-		$NP_WIZ_SYNC_ARGS \
+		$NP_WIZ_SYNC_ARGS $NP_WIZ_MODE_ARGS $NP_WIZ_CAPS_ARGS \
 		> "$LOGS_PATH/netplay-wizard.txt" 2>&1
 	if [ $? -ne 0 ]; then
 		exit 0

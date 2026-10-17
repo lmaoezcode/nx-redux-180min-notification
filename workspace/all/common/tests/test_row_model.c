@@ -20,7 +20,7 @@ static void sizes(void) {
 	assert(near(b.item_w / b.item_h, 170.0f / 150, 1e-3f));
 	assert(b.item_h <= (504 - 2 * BAR) - 32 + 0.01f);
 	RowSizes l = Row_sizes(ROW_BACKDROP_LOGO, 896, 504 - 2 * BAR);
-	assert(near(l.scale, 0.40f, 1e-4f) && near(l.item_w, 415 * l.f, 0.01f));
+	assert(near(l.scale, 0.40f, 1e-4f) && near(l.item_w, 460 * l.f, 0.01f));
 	RowSizes t = Row_sizes(ROW_BACKDROP_TOOL, 896, 504 - 2 * BAR);
 	assert(near(t.gap, 14 * t.f, 0.01f) && near(t.item_h, 208 * t.f, 0.01f) && near(t.item_w, 240 * t.f, 0.01f));
 }
@@ -132,14 +132,20 @@ static int spPx(const Screen* s, float sp) { // NX_SP
 	return (int)(sp * s->scale * 12.0f / 14.0f + 0.5f);
 }
 
-// Main-menu Carousel (sub-project 8): Consoles' logo slot 415 x 164 (sides 0.40), Collections' tool slot twice as
+// Main-menu Carousel (sub-project 8): Consoles' logo slot 460 x 182 (sides 0.40, 48 apart), Collections' tool slot twice as
 // wide with sides at 0.5, Tools' 240 x 208.
 static void main_menu_sizes(void) {
 	float bh = 504 - 2 * BAR;
 	RowSizes l = Row_sizes(ROW_BACKDROP_LOGO, 896, bh);
-	assert(near(l.f, 896.0f / 960, 1e-4f));
-	assert(near(l.item_w, 415 * l.f, 0.01f) && near(l.item_h, 164 * l.f, 0.01f) && near(l.scale, 0.40f, 1e-4f));
-	assert(near(l.gap, 28 * l.f, 0.01f));
+	assert(near(l.f, bh / 500, 1e-4f)); // the SPS body's height binds (425.6 / 500 under 896 / 960)
+	assert(near(l.item_w, 460 * l.f, 0.01f) && near(l.item_h, 182 * l.f, 0.01f) && near(l.scale, 0.40f, 1e-4f));
+	assert(near(l.gap, 48 * l.f, 0.01f));
+	// sized by the screen alone: no 1.0 cap, so a roomy body (a small UI scale on a big panel) still scales it
+	RowSizes big = Row_sizes(ROW_BACKDROP_LOGO, 1920, 1000);
+	assert(near(big.f, 2.0f, 1e-4f) && near(big.item_w, 920, 0.01f));
+	// the Brick's body is tall enough: the width binds there
+	RowSizes br = Row_sizes(ROW_BACKDROP_LOGO, 1024 / (3 * 30.0f / 42.0f), 280);
+	assert(near(br.f, 1024 / (3 * 30.0f / 42.0f) / 960, 1e-4f));
 	RowSizes c = Row_sizes(ROW_BACKDROP_COLL, 896, bh);
 	assert(near(c.item_w, 300 * c.f, 0.01f) && near(c.item_h, 160 * c.f, 0.01f) && near(c.gap, 14 * c.f, 0.01f));
 	assert(near(c.scale, 0.5f, 1e-4f));
@@ -178,11 +184,12 @@ static void main_menu_centring(void) {
 			assert(near(Row_top(BAR, bh, z.item_h, 0, 18 * z.f, 0), top, 1e-4f));
 		}
 	}
-	// the logo slot exactly: Brick f = 477.87 / 960, 81.64 dp tall, its top at 138.38 dp; SPS 153.07 dp at 175.47 dp
+	// the logo slot exactly: Brick f = 477.87 / 960, 90.60 dp tall, its top at 133.90 dp; SPS f = 425.6 / 500, 154.92 dp
+	// at 174.54 dp
 	RowSizes l = Row_sizes(ROW_BACKDROP_LOGO, 1024 / pdOf(&SCREENS[0]), 280);
-	assert(near(l.item_h, 81.64f, 0.01f) && near(Row_top(BAR, 280, l.item_h, 0, 0, 0), 138.38f, 0.01f));
+	assert(near(l.item_h, 90.60f, 0.01f) && near(Row_top(BAR, 280, l.item_h, 0, 0, 0), 133.90f, 0.01f));
 	RowSizes ls = Row_sizes(ROW_BACKDROP_LOGO, 896, 504 - 2 * BAR);
-	assert(near(ls.item_h, 153.07f, 0.01f) && near(Row_top(BAR, 504 - 2 * BAR, ls.item_h, 0, 0, 0), 175.47f, 0.01f));
+	assert(near(ls.item_h, 154.92f, 0.01f) && near(Row_top(BAR, 504 - 2 * BAR, ls.item_h, 0, 0, 0), 174.54f, 0.01f));
 }
 
 // Consoles: "N games" 8 dp under the logo as drawn, its height from the logo's aspect in the slot.
@@ -192,10 +199,10 @@ static void consoles_count_y(void) {
 	assert(near(Row_containH(330, 130, 0), 130, 1e-4f));		   // no aspect: the slot
 	assert(near(Row_logoCountY(100, 40, 8), 128, 1e-4f));
 	const float centre[2] = {179.2f, 252.0f};
-	// Mega Drive (4.20: the width binds), PrBoom (1.93, the squarest bundled logo: the slot's 164 f height binds), a
+	// Mega Drive (4.20: the width binds), PrBoom (1.93, the squarest bundled logo: the slot's 182 f height binds), a
 	// square logo (the height binds too)
 	const float aspects[3] = {4.20f, 1.93f, 1.0f};
-	const float brick_y[3] = {211.79f, 228.02f, 228.02f}, sps_y[3] = {306.11f, 336.53f, 336.53f};
+	const float brick_y[3] = {214.46f, 232.50f, 232.50f}, sps_y[3] = {306.61f, 337.46f, 337.46f};
 	for (int s = 0; s < 2; s++) {
 		const Screen* sc = &SCREENS[s];
 		float sw = sc->w / pdOf(sc), bh = sc->h / pdOf(sc) - 2 * BAR;
@@ -367,7 +374,78 @@ static void backdrop_dim(void) {
 		assert(Row_backdropGain(i / 100.0f) <= 0.28f + 1e-4f);
 }
 
+// Content-sized slots (Horizontal Tools and Collections): each item as wide as its content, one gap between neighbours'
+// edges. Equal widths give Row_item's offsets exactly; unequal ones keep the edge gap at rest and slide linearly.
+static float widthOf(int i, void* ctx) {
+	return ((const float*)ctx)[i];
+}
+static void test_content_sized_dx(void) {
+	RowSizes s = Row_sizes(ROW_BACKDROP_TOOL, 960, 358);
+	float eq[9];
+	for (int i = 0; i < 9; i++)
+		eq[i] = s.item_w;
+	float poss[] = {4, 4.25f, 4.5f, 4.9f, 5};
+	for (int p = 0; p < 5; p++)
+		for (int i = 0; i < 9; i++) {
+			float dx = Row_itemDxVar(&s, (float)i, poss[p], 9, widthOf, eq);
+			assert(fabsf(dx - Row_item(&s, ROW_BACKDROP_TOOL, (float)i, poss[p]).dx) < 0.01f);
+		}
+	float w[5] = {100, 60, 200, 80, 120}; // at rest on 2: the edge gap between every pair of neighbours
+	for (int i = 1; i < 5; i++) {
+		float a = Row_itemDxVar(&s, (float)(i - 1), 2, 5, widthOf, w), b = Row_itemDxVar(&s, (float)i, 2, 5, widthOf, w);
+		float wa = w[i - 1] * (i - 1 == 2 ? 1 : s.scale), wb = w[i] * (i == 2 ? 1 : s.scale);
+		assert(fabsf((b - wb / 2) - (a + wa / 2) - s.gap) < 0.01f);
+	}
+	assert(fabsf(Row_itemDxVar(&s, 2, 2, 5, widthOf, w)) < 0.01f); // the selection centred
+	// halfway: halfway between the two rests
+	float m = Row_itemDxVar(&s, 3, 2.5f, 5, widthOf, w);
+	float r2 = Row_itemDxVar(&s, 3, 2, 5, widthOf, w), r3 = Row_itemDxVar(&s, 3, 3, 5, widthOf, w);
+	assert(fabsf(m - (r2 + r3) / 2) < 0.01f);
+}
+
+// Row_collBreakFit without a measure: the length rule alone
+static int collBreak(const char* name, char l[2][256]) {
+	return Row_collBreakFit(name, l, NULL, NULL, 0);
+}
+
+// Collection names: a word longer than 5 characters starts a new line (never the first word; 2 lines at most, the rest
+// staying on the second).
+static void test_coll_break(void) {
+	char l[2][256];
+	assert(collBreak("To Be Completed", l) == 2 && !strcmp(l[0], "To Be") && !strcmp(l[1], "Completed"));
+	assert(collBreak("Play Later", l) == 1 && !strcmp(l[0], "Play Later")); // "Later" is 5
+	assert(collBreak("Favorites", l) == 1 && !strcmp(l[0], "Favorites"));
+	assert(collBreak("Pokemon Games", l) == 1 && !strcmp(l[0], "Pokemon Games")); // the first word stays
+	assert(collBreak("Super Mario Collection", l) == 2 && !strcmp(l[0], "Super Mario") &&
+		   !strcmp(l[1], "Collection"));
+	assert(collBreak("My Retro Achievements Picks", l) == 2 && !strcmp(l[0], "My Retro") &&
+		   !strcmp(l[1], "Achievements Picks"));								  // 2 lines at most
+	assert(collBreak("  Spaced   Out  ", l) == 1 && !strcmp(l[0], "Spaced Out")); // runs of spaces collapse
+	assert(collBreak("", l) == 0);
+	// characters, not bytes: "日本語" is 3 (9 bytes), "Pokémon" 7 (8 bytes)
+	assert(collBreak("RPG 日本語", l) == 1 && !strcmp(l[0], "RPG 日本語"));
+	assert(collBreak("Ma Série", l) == 1); // "Série" is 5 (6 bytes)
+	assert(collBreak("My Pokémon", l) == 2 && !strcmp(l[1], "Pokémon"));
+}
+
+// The width rule too: a line that would overflow max_w breaks before the word (short words wrap as well).
+static int charW(const char* t, void* ctx) {
+	(void)ctx;
+	return (int)strlen(t) * 10; // 10 px a character
+}
+static void test_coll_break_fit(void) {
+	char l[2][256];
+	assert(Row_collBreakFit("Super Mario Bros Games Ever", l, charW, NULL, 120) == 2 &&
+		   !strcmp(l[0], "Super Mario") && !strcmp(l[1], "Bros Games Ever"));						  // 12 chars max a line
+	assert(Row_collBreakFit("To Be Completed", l, charW, NULL, 1000) == 2 && !strcmp(l[0], "To Be")); // the >5 rule
+	assert(Row_collBreakFit("Play Later", l, charW, NULL, 1000) == 1);
+	assert(Row_collBreakFit("Play Later", l, NULL, NULL, 0) == 1); // no measure: the >5 rule alone
+}
+
 int main(void) {
+	test_coll_break_fit();
+	test_coll_break();
+	test_content_sized_dx();
 	box_slot_fits_caption();
 	sizes();
 	item_layout();

@@ -31,7 +31,9 @@
 
 enum { KIND_CONTINUE,
 	   KIND_PIN,
-	   KIND_BOXART,
+	   KIND_BOXART,	   // the Backdrop row's items: 3D box art (Layouts > Backdrop art's default)
+	   KIND_BOXART_2D, // ... 2D box art, else the 3D box art (its own kind: an art type never reuses another's picture)
+	   KIND_WHEEL,	   // ... the wheel, else the 3D box art
 	   KIND_BACKDROP,
 	   KIND_BOXPH }; // the placeholder case's abstract plate (box-art pool)
 
@@ -63,6 +65,7 @@ static SDL_cond* cond = NULL;
 static SDL_Thread* worker = NULL;
 static SDL_atomic_t shutdownFlag;
 static SDL_atomic_t loadedFlag;
+static SDL_atomic_t changes; // finished loads and forgets (HomeArt_changes)
 
 ///////////////////////////////////////
 // Picture shaping (worker thread)
@@ -185,7 +188,7 @@ static SDL_Surface* screenshotFor(const char* rom, HomeArtRect* keep) {
 #define PLACEHOLDER_BOX_H 500
 
 // The PNG write (~100+ ms on the card) waits in a small queue so it never delays a decode: the worker writes one only
-// when no request is queued, and the rest when it stops. Worker thread only.
+// when no request is queued; those still queued when it stops are dropped (made again on demand). Worker thread only.
 #define PENDING_PNG_MAX 8
 typedef struct {
 	char path[MAX_PATH];
@@ -231,19 +234,23 @@ static void queuePlaceholderPng(SDL_Surface* s, const char* path) {
 	p->surface = copy;
 }
 
-static SDL_Surface* placeholderFor(const char* rom, bool box, HomeArtRect* keep) {
+// The abstract picture's seed (the ROM's file name without its extension) and its PNG's path. Pure: any thread.
+static void placeholderSeed(const char* rom, bool box, char* seed /* MAX_PATH */, char* path /* MAX_PATH */) {
 	const char* base = strrchr(rom, '/');
 	base = base ? base + 1 : rom;
-	char seed[MAX_PATH];
-	snprintf(seed, sizeof(seed), "%s", base);
+	snprintf(seed, MAX_PATH, "%s", base);
 	char* dot = strrchr(seed, '.');
 	if (dot && dot != seed)
 		*dot = '\0';
 	uint32_t hash = 2166136261u;
 	for (const char* c = seed; *c; c++)
 		hash = (hash ^ (uint8_t)*c) * 16777619u;
-	char path[MAX_PATH];
-	snprintf(path, sizeof(path), "%s/%08x%s.png", PLACEHOLDER_DIR, hash, box ? "_box" : "");
+	snprintf(path, MAX_PATH, "%s/%08x%s.png", PLACEHOLDER_DIR, hash, box ? "_box" : "");
+}
+
+static SDL_Surface* placeholderFor(const char* rom, bool box, HomeArtRect* keep) {
+	char seed[MAX_PATH], path[MAX_PATH];
+	placeholderSeed(rom, box, seed, path);
 	SDL_Surface* s = NULL;
 	for (int i = 0; i < pendingPngCount && !s; i++) // generated a moment ago, not on the card yet
 		if (!strcmp(pendingPngs[i].path, path))
@@ -315,11 +322,19 @@ static SDL_Surface* addShadow(SDL_Surface* art, int pad, int off, int r) {
 	return dst;
 }
 
-// Box art fitted (contain) into w×h with its soft shadow; *ox/*oy = the art's top-left in the result.
-static SDL_Surface* buildBoxart(const char* rom, int w, int h, int* ox, int* oy) {
+// Box art fitted (contain) into w×h with its soft shadow; *ox/*oy = the art's top-left in the result. KIND_BOXART_2D and
+// KIND_WHEEL fit the scraped 2D box art or wheel the same way (a wheel keeps its wide aspect), falling back to the 3D
+// box art when the game has none (or it can't be read).
+static SDL_Surface* buildBoxart(int kind, const char* rom, int w, int h, int* ox, int* oy) {
 	char path[MAX_PATH];
-	ROM_displayArtPath(rom, ART_TYPE_BOXART, false, path, sizeof(path));
-	SDL_Surface* src = loadArgb(path);
+	SDL_Surface* src = NULL;
+	if (kind != KIND_BOXART &&
+		ROM_findListArt(rom, kind == KIND_BOXART_2D ? GAME_LIST_ART_BOXART2D : GAME_LIST_ART_WHEEL, path, sizeof(path)))
+		src = loadArgb(path);
+	if (!src) {
+		ROM_displayArtPath(rom, ART_TYPE_BOXART, false, path, sizeof(path));
+		src = loadArgb(path);
+	}
 	if (!src || dropIfCancelled(src))
 		return NULL;
 	float s = fminf((float)w / src->w, (float)h / src->h);
@@ -388,8 +403,8 @@ static SDL_Surface* buildBackdrop(const char* rom, int w, int h) {
 
 static SDL_Surface* buildPicture(int kind, const char* rom, const char* preview, int w, int h, int radius, int* ox,
 								 int* oy) {
-	if (kind == KIND_BOXART)
-		return buildBoxart(rom, w, h, ox, oy);
+	if (kind == KIND_BOXART || kind == KIND_BOXART_2D || kind == KIND_WHEEL)
+		return buildBoxart(kind, rom, w, h, ox, oy);
 	if (kind == KIND_BACKDROP)
 		return buildBackdrop(rom, w, h);
 	if (kind == KIND_BOXPH) {
@@ -471,13 +486,18 @@ static int workerMain(void* arg) {
 			pick->oy = oy;
 			pick->state = result ? HOMEART_READY : HOMEART_NONE;
 			SDL_AtomicSet(&loadedFlag, 1);
+			SDL_AtomicIncRef(&changes);
 		} else if (result) {
 			SDL_FreeSurface(result); // evicted while decoding
 		}
 	}
 	SDL_UnlockMutex(mutex);
-	while (writeOnePendingPng()) // stopping: the placeholders not on the card yet
-		;
+	// stopping (nextui quits on every launch): the placeholders not on the card yet are dropped, not written (~100+ ms
+	// each); placeholderFor makes a missing one again on its next view. A write under way finished before the
+	// shutdown check above (and goes through a .tmp rename), so no half-written file is left.
+	for (int i = 0; i < pendingPngCount; i++)
+		SDL_FreeSurface(pendingPngs[i].surface);
+	pendingPngCount = 0;
 	return 0;
 }
 
@@ -502,7 +522,7 @@ static bool ensureStarted(void) {
 
 // Each kind evicts within its own pool: [first, first + count).
 static void poolFor(int kind, int* first, int* count) {
-	if (kind == KIND_BOXART || kind == KIND_BOXPH) {
+	if (kind == KIND_BOXART || kind == KIND_BOXART_2D || kind == KIND_WHEEL || kind == KIND_BOXPH) {
 		*first = POOL_PICTURE_SIZE;
 		*count = POOL_BOXART_SIZE;
 	} else if (kind == KIND_BACKDROP) {
@@ -550,8 +570,10 @@ static HomeArtState lookup(int kind, const char* rom, const char* preview, int w
 	}
 	if (!hit) {
 		hit = victim;
-		if (hit->surface)
+		if (hit->surface) {
+			PLAT_freeSurfaceTexture(hit->surface); // a Grid draws pictures as GPU sprites (UI thread: here)
 			SDL_FreeSurface(hit->surface);
+		}
 		*hit = (Slot){.used = true, .kind = kind, .w = w, .h = h, .radius = radius, .state = HOMEART_LOADING, .queued = true, .gen = ++genCounter};
 		snprintf(hit->rom, sizeof(hit->rom), "%s", rom);
 		snprintf(hit->preview, sizeof(hit->preview), "%s", preview);
@@ -581,8 +603,10 @@ HomeArtState HomeArt_pin(const char* rom_path, int w, int h, int radius_px, SDL_
 	return lookup(KIND_PIN, rom_path, NULL, w, h, radius_px, out, NULL, NULL);
 }
 
-HomeArtState HomeArt_boxart(const char* rom_path, int w, int h, SDL_Surface** out, int* ox, int* oy) {
-	return lookup(KIND_BOXART, rom_path, NULL, w, h, 0, out, ox, oy);
+HomeArtState HomeArt_boxart(const char* rom_path, int art, int w, int h, SDL_Surface** out, int* ox, int* oy) {
+	int kind = art == BACKDROP_ART_BOXART2D ? KIND_BOXART_2D : art == BACKDROP_ART_WHEEL ? KIND_WHEEL
+																						 : KIND_BOXART;
+	return lookup(kind, rom_path, NULL, w, h, 0, out, ox, oy);
 }
 
 HomeArtState HomeArt_boxPlaceholder(const char* rom_path, int w, int h, SDL_Surface** out) {
@@ -597,6 +621,10 @@ unsigned HomeArt_lastGen(void) {
 	return lastGen;
 }
 
+unsigned HomeArt_changes(void) {
+	return (unsigned)SDL_AtomicGet(&changes);
+}
+
 bool HomeArt_checkAsyncLoaded(void) {
 	return SDL_AtomicCAS(&loadedFlag, 1, 0);
 }
@@ -609,13 +637,48 @@ void HomeArt_forget(const char* rom_path) {
 		Slot* s = &slots[i];
 		if (!s->used || strcmp(s->rom, rom_path) != 0)
 			continue;
-		if (s->surface)
+		if (s->surface) {
+			PLAT_freeSurfaceTexture(s->surface);
 			SDL_FreeSurface(s->surface);
+		}
 		s->surface = NULL;
 		s->used = false; // a result the worker is still building is dropped (its slot no longer matches)
 		s->gen = ++genCounter;
 	}
 	SDL_UnlockMutex(mutex);
+	SDL_AtomicIncRef(&changes);
+}
+
+void HomeArt_dropPlaceholders(const char* rom_path) {
+	if (!rom_path)
+		return;
+	char seed[MAX_PATH], path[MAX_PATH];
+	placeholderSeed(rom_path, false, seed, path);
+	unlink(path);
+	placeholderSeed(rom_path, true, seed, path);
+	unlink(path);
+}
+
+// Refresh Roms: art may have been copied onto the card since, and a game without any was cached as its abstract
+// picture (or a miss), so every picture is built again on its next view.
+void HomeArt_forgetAll(void) {
+	if (!mutex)
+		return;
+	SDL_LockMutex(mutex);
+	for (int i = 0; i < HOMEART_CACHE_SIZE; i++) {
+		Slot* s = &slots[i];
+		if (!s->used)
+			continue;
+		if (s->surface) {
+			PLAT_freeSurfaceTexture(s->surface);
+			SDL_FreeSurface(s->surface);
+		}
+		s->surface = NULL;
+		s->used = false;
+		s->gen = ++genCounter;
+	}
+	SDL_UnlockMutex(mutex);
+	SDL_AtomicIncRef(&changes);
 }
 
 void HomeArt_quit(void) {
@@ -628,8 +691,10 @@ void HomeArt_quit(void) {
 		worker = NULL;
 	}
 	for (int i = 0; i < HOMEART_CACHE_SIZE; i++) {
-		if (slots[i].surface)
+		if (slots[i].surface) {
+			PLAT_freeSurfaceTexture(slots[i].surface);
 			SDL_FreeSurface(slots[i].surface);
+		}
 		slots[i] = (Slot){0};
 	}
 	lruCounter = 0;
@@ -649,4 +714,88 @@ void HomeArt_quit(void) {
 
 Entry* Home_continueEntry(void) {
 	return Recents_firstRom();
+}
+
+///////////////////////////////////////
+// The Home List's background (the thumbnail loader's pictures)
+
+// "<prefix>cont\n<preview>\n<rom>" (a resume frame) or "<prefix>abs\n<rom>" (the abstract picture): never a file's
+// path (a control character leads)
+#define LIST_PATH_PREFIX "\x01home:"
+
+void HomeArt_listPath(const char* rom_path, const char* preview_path, char* out, size_t size) {
+	out[0] = '\0';
+	if (!rom_path || !rom_path[0])
+		return;
+	int n = -1;
+	if (preview_path && preview_path[0])
+		n = snprintf(out, size, LIST_PATH_PREFIX "cont\n%s\n%s", preview_path, rom_path);
+	if (n >= 0 && (size_t)n < size)
+		return;
+	ROM_findScreenshot(rom_path, out, size); // the scraped screenshot, else the root .media picture (Ports)
+	if (out[0] && access(out, F_OK) == 0)
+		return;
+	n = snprintf(out, size, LIST_PATH_PREFIX "abs\n%s", rom_path);
+	if (n < 0 || (size_t)n >= size)
+		out[0] = '\0';
+}
+
+bool HomeArt_isListPath(const char* path) {
+	return path && strncmp(path, LIST_PATH_PREFIX, sizeof(LIST_PATH_PREFIX) - 1) == 0;
+}
+
+// The abstract picture: its PNG when Grid or the Carousel made it already, else rendered here (not saved: the Home
+// art worker owns the writes).
+static SDL_Surface* listAbstract(const char* rom) {
+	char seed[MAX_PATH], path[MAX_PATH];
+	placeholderSeed(rom, false, seed, path);
+	SDL_Surface* s = loadArgb(path);
+	if (s)
+		return s;
+	s = SDL_CreateRGBSurfaceWithFormat(0, PLACEHOLDER_W, PLACEHOLDER_H, 32, SDL_PIXELFORMAT_ARGB8888);
+	if (s)
+		PlaceholderArt_render(s->pixels, s->w, s->h, s->pitch / 4, seed);
+	return s;
+}
+
+SDL_Surface* HomeArt_loadListPath(const char* path) {
+	if (!HomeArt_isListPath(path))
+		return NULL;
+	const char* p = path + sizeof(LIST_PATH_PREFIX) - 1;
+	if (strncmp(p, "abs\n", 4) == 0)
+		return listAbstract(p + 4);
+	if (strncmp(p, "cont\n", 5) != 0)
+		return NULL;
+	p += 5;
+	const char* nl = strchr(p, '\n');
+	if (!nl)
+		return NULL;
+	char preview[MAX_PATH];
+	snprintf(preview, sizeof(preview), "%.*s", (int)(nl - p), p);
+	const char* rom = nl + 1;
+	// Continue's resume frame without its letterbox (as HomeArt_continue's); a black one gives way to the screenshot,
+	// then the abstract picture
+	SDL_Surface* src = loadArgb(preview);
+	if (src) {
+		SDL_LockSurface(src);
+		HomeArtRect keep = HomeArt_trimLetterbox(src->pixels, src->w, src->h, src->pitch / 4);
+		bool blank = HomeArt_isBlankFrame(src->pixels, keep, src->pitch / 4);
+		SDL_UnlockSurface(src);
+		if (!blank && keep.w > 0 && keep.h > 0) {
+			if (keep.x == 0 && keep.y == 0 && keep.w == src->w && keep.h == src->h)
+				return src;
+			SDL_Surface* cut = SDL_CreateRGBSurfaceWithFormat(0, keep.w, keep.h, 32, SDL_PIXELFORMAT_ARGB8888);
+			if (cut) {
+				SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);
+				SDL_BlitSurface(src, &(SDL_Rect){keep.x, keep.y, keep.w, keep.h}, cut, NULL);
+			}
+			SDL_FreeSurface(src);
+			return cut;
+		}
+		SDL_FreeSurface(src);
+	}
+	char shot[MAX_PATH];
+	ROM_findScreenshot(rom, shot, sizeof(shot));
+	src = loadArgb(shot);
+	return src ? src : listAbstract(rom);
 }

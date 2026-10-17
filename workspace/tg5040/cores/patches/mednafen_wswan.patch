@@ -1,3 +1,4 @@
+# license: modifies Beetle WonderSwan (https://github.com/libretro/beetle-wswan-libretro), GPL-2.0 (COPYING); this patch is distributed under the same license.
 diff --git a/Makefile b/Makefile
 index 878e147..54c7129 100644
 --- a/Makefile

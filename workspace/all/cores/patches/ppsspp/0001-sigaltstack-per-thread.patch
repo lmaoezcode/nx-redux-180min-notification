@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # reason: InstallExceptionHandler runs on the boot loader thread and saves that thread's
 # sigaltstack; UninstallExceptionHandler runs from retro_unload_game on the frontend's thread
 # and restores the saved stack there. sigaltstack is per thread, so the frontend thread ends up

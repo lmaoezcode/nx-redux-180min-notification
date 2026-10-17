@@ -290,6 +290,20 @@ curl() {
 }
 fi
 EOF
+    cat >> "$PM_DIR/control.txt" <<'EOF'
+
+# ---- NX Redux: PowerVR SDL contexts for NextOS ports ----
+# The Bricks' GPU is a PowerVR GE8300, but TrimUI's SDL names its fbdev EGL
+# backend "mali". The NextOS Universal Ports' Unity loaders read that name as
+# real Mali fbdev and create raw EGL contexts outside SDL's window: audio and
+# input work, the picture stays black. Each loader has a switch to keep the
+# contexts SDL-owned (Horizon Chase verified on the Brick Pro). Remove once
+# NextOS picks SDL contexts on PowerVR by itself:
+# https://github.com/NextOs-Ports/nextos-universal-ports/issues/1
+export HC_PURE_SDL_CONTEXTS=1 HD_PURE_SDL_CONTEXTS=1 BC_PURE_SDL_CONTEXTS=1 \
+  FP2_PURE_SDL_CONTEXTS=1 PF2_PURE_SDL_CONTEXTS=1 HGO_PURE_SDL_CONTEXTS=1 \
+  ST_PURE_SDL_CONTEXTS=1 SF_PURE_SDL_CONTEXTS=1 SC_PURE_SDL_CONTEXTS=1
+EOF
 }
 
 
@@ -307,9 +321,15 @@ patch_platform_py() {
     rm -rf "$PM_DIR/pylibs/harbourmaster/__pycache__"
 }
 
+# Upstream sets CUR_TTY="/dev/fd/1" (the port's stdout). Port scripts write
+# messages with `> "$CUR_TTY"` after `exec > "$GAMEDIR/log.txt"`, and reopening
+# /dev/fd/1 with > truncates that log: the port wiped its own error output
+# (NextOS Streets of Rage 4, Castle of Illusion, Geometry Dash). /dev/null
+# loses only those console messages.
 patch_mod_trimui() {
     [ -f "$PM_DIR/mod_TrimUI.txt" ] || return 0
-    sed -i "s|/mnt/SDCARD/Data/home|$SHARED_USERDATA_PATH/PORTS-portmaster|g" "$PM_DIR/mod_TrimUI.txt"
+    sed -i -e "s|/mnt/SDCARD/Data/home|$SHARED_USERDATA_PATH/PORTS-portmaster|g" \
+        -e 's|^CUR_TTY="/dev/fd/1"$|CUR_TTY="/dev/null"  # NX Redux: no log truncation|' "$PM_DIR/mod_TrimUI.txt"
 }
 
 patch_pugwash_scanner() {

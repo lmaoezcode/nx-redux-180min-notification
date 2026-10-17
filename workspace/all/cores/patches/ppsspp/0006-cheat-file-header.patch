@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # retro_cheat_set wrote the header chunk of the cheat file (the BOM a new file starts
 # with) back as a "_C" line, so CwCheat rejected the file ("could not parse cheat name
 # line") and no cheat set through the libretro API ever applied.

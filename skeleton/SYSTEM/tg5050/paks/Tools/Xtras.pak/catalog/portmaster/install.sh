@@ -12,7 +12,7 @@
 # first open). What lands where:
 #   - PortMaster.zip (pugwash GUI)  -> Emus/shared/PortMaster/ (upstream's
 #     own PortMaster/ zip root, extracted into Emus/shared/)
-#   - runtime deps (bin/lib/libs/pylibs zips, cert, patch helper) already
+#   - runtime deps (bin/lib/pylibs zips, cert, patch helper) already
 #     ship on every card in Emus/shared/PortMaster/files/ (skeleton BASE) -
 #     extracted/copied into the runtime tree here, exactly as the old elf's
 #     extract_deps() did (compat-lib quarantine, unversioned .so copies,
@@ -20,9 +20,7 @@
 #   - Emus/PORTS.pak/launch.sh (the Ports console runner) <- pak/ports_launch.sh
 #   - Tools/PortMaster.pak (the GUI tool pak: just launch.sh, which is the
 #     whole launcher since 2026-09-16) <- $CATALOG_DIR/pak/ - the FLAT location: getTools()
-#     (nextui/content.c) lists flat SD paks first, and migrate-paks.sh only
-#     deletes a flat name while .system ships a same-named pak, which this
-#     build no longer does. The platform subfolder is the community-pak
+#     (nextui/content.c) lists flat SD paks first. The platform subfolder is the community-pak
 #     convention for paks that hardcode it internally; this one is
 #     location-independent, and one card serves one platform anyway.
 # Because those two copies (Tools/PortMaster.pak and Emus/PORTS.pak/launch.sh)
@@ -88,16 +86,18 @@ USERDATA_DIR="$SDCARD_PATH/.userdata/$PLATFORM"
 # failure leaves any prior successful install fully untouched. From then on
 # a failure may leave the runtime half-written - a truncated pugwash must
 # not stay launchable - so fail() strips the runtime back to the BASE-
-# shipped files/ and pulls both launchers (same shape as
-# uninstall.sh; ports/saves in Roms are never touched). Re-running install
-# recovers cleanly.
+# shipped files/ and pulls both launchers (ports/saves in Roms are never
+# touched). Unlike uninstall.sh it keeps config/ (the player's settings and
+# added sources), libs/ (runtimes PortMaster downloaded) and themes/: a
+# failed update must not cost those, and re-running install overwrites
+# every file it extracts, so it recovers cleanly over them.
 TARGET_DIRTY=0
 
 cleanup_runtime() {
     for entry in "$PM_DIR"/* "$PM_DIR"/.[!.]*; do
         [ -e "$entry" ] || continue
         case "$(basename "$entry")" in
-            files) ;;
+            files|config|libs|themes) ;;
             *) rm -rf "$entry" ;;
         esac
     done
@@ -180,10 +180,10 @@ EOF
 if ! command -v "$NX_EXTRAS_UNZIP" >/dev/null 2>&1; then
     fail "system unzip tool missing - update or reinstall NX Redux, then retry"
 fi
-for f in bin.zip lib.zip libs.zip pylibs.zip ca-certificates.crt disable_python_function.py; do
+for f in bin.zip lib.zip pylibs.zip ca-certificates.crt disable_python_function.py; do
     [ -f "$PM_FILES/$f" ] || fail "bundled runtime files missing ($f) - reinstall the NX Redux BASE files, then retry"
 done
-for f in launch.sh ports_launch.sh; do
+for f in launch.sh ports_launch.sh launch_options.sh launch_options.json; do
     [ -f "$CATALOG_DIR/pak/$f" ] || fail "catalog pak payload missing ($f)"
 done
 
@@ -219,12 +219,12 @@ echo "Extracting libraries..."
 mkdir -p "$PM_DIR/lib"
 extract "$PM_FILES/lib.zip" "$PM_DIR/lib" || fail "could not extract bundled libraries"
 
-echo "@75 Extracting additional libraries..."
-echo "Extracting additional libraries..."
+# Runtimes (Weston, Java, Godot, Mono...) go to libs/: PortMaster downloads
+# each one when a port that needs it is installed, and a port's launcher
+# fetches it at launch if it is missing. None is bundled.
 mkdir -p "$PM_DIR/libs"
-extract "$PM_FILES/libs.zip" "$PM_DIR/libs" || fail "could not extract additional libraries"
 
-echo "@85 Extracting Python libraries..."
+echo "@80 Extracting Python libraries..."
 echo "Extracting Python libraries..."
 # pylibs.zip carries exlibs/ and pylibs/ at its root
 extract "$PM_FILES/pylibs.zip" "$PM_DIR" || fail "could not extract Python libraries"
@@ -315,6 +315,11 @@ echo "Installing launchers..."
 mkdir -p "$PORTS_PAK" || fail "cannot create PORTS.pak"
 cp -f "$CATALOG_DIR/pak/ports_launch.sh" "$PORTS_PAK/launch.sh" || fail "could not create the Ports console launcher"
 chmod +x "$PORTS_PAK/launch.sh" 2>/dev/null || true
+# Launch Options (per-game cores / CPU / GPU): the editor, whose presence is
+# nextui's "Launch Options" context-menu marker, and its schema.
+cp -f "$CATALOG_DIR/pak/launch_options.sh" "$CATALOG_DIR/pak/launch_options.json" "$PORTS_PAK/" \
+    || fail "could not install the Ports Launch Options"
+chmod +x "$PORTS_PAK/launch_options.sh" 2>/dev/null || true
 
 # The GUI tool pak, at the flat Tools location (see header). launch.sh IS
 # the launcher (no elf since 2026-09-16). Earlier generations also left a

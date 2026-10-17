@@ -25,6 +25,7 @@ static int exists(const char* id, const char* suffix) {
 int main(void) {
 	// a console's own pad, through its logo id and every tag that names it
 	assert(is("Sony PlayStation (PS)", "ps"));
+	assert(is("Sony PlayStation (PSX)", "ps")); // SwanStation
 	assert(is("Game Boy Advance (GBA)", "gba") && is("Game Boy Advance (MGBA)", "gba"));
 	assert(is("Super Nintendo (SFC)", "sfc") && is("Super Nintendo ES (SUPA)", "sfc"));
 	assert(is("Sega Genesis (MD)", "md") && is("Sega Genesis (GPGX)", "md"));
@@ -32,6 +33,7 @@ int main(void) {
 	assert(is("Nintendo Entertainment System (FC)", "fc") && is("Dreamcast (DC)", "dc"));
 	// reuse: Super Game Boy on the SNES pad, Sega CD and 32X on the Mega Drive's, Neo Geo Pocket on the Color's
 	assert(is("Super Game Boy (SGB)", "sfc"));
+	assert(is("Dreamcast Lite (DCX)", "dc")); // same controller as Dreamcast
 	assert(is("Sega CD (SEGACD)", "md") && is("Sega CD (GPGX)", "md") && is("Sega 32X (32X)", "md"));
 	assert(is("Neo Geo Pocket (NGP)", "ngpc") && is("Neo Geo Pocket Color (NGPC)", "ngpc"));
 	// no hardware of their own, or no image: keep the logo
@@ -57,9 +59,9 @@ int main(void) {
 
 	// boxes and fit: a wide pad fills the width, a tall one the height
 	PadSize b = Pad_rowBox(100);
-	assert(near(b.w, 280) && near(b.h, 180));
+	assert(near(b.w, 300) && near(b.h, 195));
 	b = Pad_stackBox(100);
-	assert(near(b.w, 260) && near(b.h, 170));
+	assert(near(b.w, 280) && near(b.h, 185));
 	PadSize f = Pad_fit(2.0f, 280, 180);
 	assert(near(f.w, 280) && near(f.h, 140));
 	f = Pad_fit(1.0f, 280, 180);

@@ -6,7 +6,6 @@
 !skeleton/BASE/Emus/**/*.so
 !skeleton/SYSTEM/shared/lib/*.so
 *.elf
-!skeleton/SYSTEM/**/N64.pak/m64p-server.elf
 *.dtb
 *.zip
 !skeleton/BASE/Emus/shared/PortMaster/files/*
@@ -37,9 +36,6 @@ libchdr
 **/other/DinguxCommander
 **/other/DinguxCommander-sdl2
 **/other/NextCommander
-**/other/mupen64plus/*
-!**/other/mupen64plus/README.md
-!**/other/mupen64plus/*.patch
 **/other/sdl2-drastic/SDL_drastic
 **/other/sdl2-drastic/extra-deps
 **/other/sdl2-drastic/output
@@ -78,3 +74,7 @@ scripts/bench/results/**/*.log
 workspace/all/scraper/ss_credentials.h
 .env
 .agents/handoff/
+
+# third-party prebuilts built from pinned source (workspace/all/prebuilts/*.sh)
+workspace/all/prebuilts/work
+workspace/all/prebuilts/output

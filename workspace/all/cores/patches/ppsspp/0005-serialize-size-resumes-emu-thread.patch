@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # retro_serialize_size resumes an emu thread it paused: minarch asks for the size on its
 # own (undo-load check while its menu highlights Load, rewind setup), after which
 # retro_run only swapped buffers and the game stayed frozen (audio 0/s).

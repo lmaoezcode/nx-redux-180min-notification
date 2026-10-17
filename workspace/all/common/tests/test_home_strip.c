@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ELLIPSIS "\xE2\x80\xA6"
+#define ELLIPSIS "..."
 
 static int run(const StripLine* l, int i, StripTone tone, const char* text) {
 	return i < l->n && l->runs[i].tone == tone && strcmp(l->runs[i].text, text) == 0;
@@ -29,17 +29,17 @@ int main(void) {
 	assert(b.n == 3 && run(&b, 0, STRIP_GREY, "Most played"));
 	assert(run(&b, 1, STRIP_WHITE, "The Legend of Zelda - The Minish Cap") && b.runs[1].gives_way);
 	assert(run(&b, 2, STRIP_GREY, "3h 55m") && !b.runs[0].gives_way && !b.runs[2].gives_way);
-	// not signed in: a grey "Sign in" for the achievements
+	// not signed in: no achievements, the line ends with the time (no dot)
 	in.signed_in = false;
 	HomeStrip_build(&in, &a, &b);
-	assert(a.n == 4 && run(&a, 3, STRIP_GREY, "Sign in"));
-	// nothing played this month: one line, "No play yet", 0 achievements
+	assert(a.n == 2 && run(&a, 1, STRIP_WHITE, "12h 38m"));
+	// nothing played this month: one line, "Nothing played yet. Let's go!", no achievements even when signed in
 	in = (StripInput){false, true, true, 0, 0, NULL, 0};
 	assert(HomeStrip_lineCount(&in) == 1);
 	HomeStrip_build(&in, &a, &b);
-	assert(run(&a, 0, STRIP_GREY, "This month") && run(&a, 1, STRIP_GREY, "No play yet") && a.runs[1].pad_l == 0.5f);
-	assert(run(&a, 3, STRIP_WHITE, "0") && b.n == 0);
-	// not computed yet: every value "…", both lines, no time on line 2
+	assert(a.n == 2 && run(&a, 0, STRIP_GREY, "Nothing played yet.") && run(&a, 1, STRIP_WHITE, "Let's go!"));
+	assert(a.runs[1].pad_l == 0.5f && b.n == 0);
+	// not computed yet: every value "...", both lines, no time on line 2
 	in = (StripInput){false, false, true, 0, 0, NULL, 0};
 	assert(HomeStrip_lineCount(&in) == 2);
 	HomeStrip_build(&in, &a, &b);

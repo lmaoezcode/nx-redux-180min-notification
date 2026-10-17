@@ -35,7 +35,8 @@ static bool simple_mode = false;
 // Parked roots (T1-1, menutabs_model.h): L1/R1 parks the outgoing tab's stack[0] here and takes the incoming
 // one's, so a tab switch costs no card I/O. Only tabs that are NOT current have a root here (the stack owns
 // stack[0]), so every existing free of stack[0] stays correct. A slot's hint keeps its selection after the root
-// is dropped. Dropped by MenuTabs_reload (the tabs in its plan's stale_tabs), MenuTabs_setCurrent and MenuTabs_dropCached (one).
+// is dropped. Dropped by MenuTabs_reload (the tabs in its plan's stale_tabs, and the tabs it hid), MenuTabs_setCurrent
+// and MenuTabs_dropCached (one).
 static MenuTabSlot slots[MENU_TAB_COUNT];
 // Content_libraryGen() when stack[0] was built, and when the parked Consoles root was: a Consoles root built
 // against an older emulist (a refresh, a delete, a Search rescan) is rebuilt instead of reused.
@@ -79,6 +80,7 @@ static void refreshInputs(const MenuReloadPlan* plan) {
 	if (plan->load_recents)
 		Recents_load();
 	if (plan->check_all) {
+		last_in.hide_home = !CFG_getShowHome();
 		last_in.show_consoles = CFG_getShowEmulators();
 		last_in.show_collections = CFG_getShowCollections();
 		last_in.show_tools = CFG_getShowTools();
@@ -112,9 +114,13 @@ MenuTabId MenuTabs_current(void) {
 	return current;
 }
 
+static unsigned generation = 0;
+
 void MenuTabs_setCurrent(MenuTabId id) {
 	// pathToStack just built a fresh stack[0] for id: a parked copy would be a second root for one tab
 	dropSlot(id);
+	if (id != current)
+		generation++; // another tab now (a deep pinned folder opened from Home lands in Consoles): as a tab switch
 	current = id;
 	root_gen = Content_libraryGen();
 }
@@ -130,6 +136,32 @@ void MenuTabs_quit(void) {
 
 bool MenuTabs_isVisible(MenuTabId id) {
 	return MenuTabs_indexOf(tabs, tab_count, id) >= 0;
+}
+
+bool MenuTabs_pushable(MenuTabId id) {
+	if (simple_mode || MenuTabs_isVisible(id))
+		return false;
+	switch (id) {
+	case MENU_TAB_CONSOLES:
+		return last_in.has_consoles;
+	case MENU_TAB_COLLECTIONS:
+		return last_in.has_collections;
+	case MENU_TAB_TOOLS:
+		return last_in.has_tools;
+	default:
+		return false;
+	}
+}
+
+// The hidden tab whose list sits pushed at stack[1] (the root context menu's item), else MENU_TAB_HOME.
+static MenuTabId pushedTab(void) {
+	if (!stack || stack->count < 2)
+		return MENU_TAB_HOME;
+	const char* path = ((Directory*)stack->items[1])->path;
+	for (int id = MENU_TAB_CONSOLES; id < MENU_TAB_COUNT; id++)
+		if (!MenuTabs_isVisible((MenuTabId)id) && exactMatch((char*)path, (char*)MenuTabs_path((MenuTabId)id)))
+			return (MenuTabId)id;
+	return MENU_TAB_HOME;
 }
 
 int MenuTabs_styleCategory(MenuTabId id) {
@@ -167,7 +199,7 @@ static MenuTabPaths tabPaths(void) {
 MenuTabId MenuTabs_forPathVisible(const char* path) {
 	MenuTabPaths p = tabPaths();
 	MenuTabId id = MenuTabs_forPath(path, &p);
-	return MenuTabs_isVisible(id) ? id : MENU_TAB_HOME;
+	return MenuTabs_isVisible(id) ? id : MenuTabs_at(0); // Home, unless it is hidden
 }
 
 // Build the Directory for a tab with a clamped selection window. `current` must already be id: the row count
@@ -181,8 +213,6 @@ static Directory* buildRoot(MenuTabId id, int selected, int start, int end) {
 	dir->end = end;
 	return dir;
 }
-
-static unsigned generation = 0;
 
 // Tab-row focus: a static, so a cold boot and a return from a game (nextui restarts) start without it.
 static bool focused = false;
@@ -202,7 +232,9 @@ static void aimDim(bool animate) {
 }
 
 void MenuTabs_setFocused(bool on) {
-	focused = on && stack && stack->count == 1;
+	// a lone tab draws no row (MenuTabs_renderRow), nor does a hidden page title (Layouts > Page title), so there is
+	// nothing to focus: UP from the content's top stops
+	focused = on && stack && stack->count == 1 && tab_count > 1 && CFG_getPageTitle();
 	aimDim(true);
 }
 
@@ -225,15 +257,11 @@ unsigned MenuTabs_generation(void) {
 	return generation;
 }
 
-// stack[0] for `id`, replacing the whole stack; the focus and the dim are the caller's. The outgoing root is
-// parked (when it is the current tab's plain root) and id's parked root reused, so a switch reads nothing from
-// the card; generation still moves, so per-view state resets as for a fresh root.
-static void openRootKeepFocus(MenuTabId id) {
-	generation++;
-	if (!stack)
-		stack = Array_new();
+// Empty the stack (it stays allocated): the lists pushed over the old root are freed (they belong to it), and the
+// root is parked when it is the current tab's plain root, else freed.
+static void parkStack(void) {
 	while (stack->count > 1)
-		DirectoryArray_pop(stack); // lists pushed over the old root belong to it
+		DirectoryArray_pop(stack);
 	Directory* old = stack->count ? Array_pop(stack) : NULL;
 	if (old && exactMatch(old->path, MenuTabs_path(current))) {
 		// not a PLATFORM-merged root (pathToStack): those are rebuilt, never parked
@@ -244,6 +272,22 @@ static void openRootKeepFocus(MenuTabId id) {
 			consoles_gen = root_gen;
 	} else if (old)
 		Directory_free(old);
+	top = NULL;
+}
+
+void MenuTabs_releaseStack(void) {
+	if (stack)
+		parkStack();
+}
+
+// stack[0] for `id`, replacing the whole stack; the focus and the dim are the caller's. The outgoing root is
+// parked (when it is the current tab's plain root) and id's parked root reused, so a switch reads nothing from
+// the card; generation still moves, so per-view state resets as for a fresh root.
+static void openRootKeepFocus(MenuTabId id) {
+	generation++;
+	if (!stack)
+		stack = Array_new();
+	parkStack();
 
 	current = id; // before anything reads the row count
 	Directory* dir = MenuTabs_slotTake(slots, id);
@@ -289,6 +333,12 @@ void MenuTabs_reload(int keep_selected, unsigned what) {
 			dropSlot((MenuTabId)id);
 	}
 	refreshInputs(&plan);
+	// a tab the change hid (Settings toggles, a last ROM or collection gone) holds its parked root until it shows
+	// again: dropped now, its hint kept. The current tab has none parked (its root is the stack's).
+	for (int id = 0; id < MENU_TAB_COUNT; id++) {
+		if (!MenuTabs_isVisible((MenuTabId)id))
+			dropSlot((MenuTabId)id);
+	}
 	MenuTabId next = tabs[MenuTabs_resolve(tabs, tab_count, current)];
 	MenuTabId old_tab = current;
 	Directory* old = stack->items[0];
@@ -301,13 +351,19 @@ void MenuTabs_reload(int keep_selected, unsigned what) {
 		old->selected =
 			ListWindow_reload(old->entries->count, GameList_rowCountAt(true), keep_selected, &old->start, &old->end);
 	} else {
-		int sel = (next == old_tab) ? keep_selected : (slots[next].hint ? slots[next].selected : 0);
 		dropSlot(next); // a parked copy would be a second root for this tab (its hint stays)
 		current = next; // before anything reads the row count (it depends on the tab's style)
-		Directory* fresh = buildRoot(next, 0, 0, 0);
-		// buildRoot's window from the top, re-windowed so the kept selection shows (as reloadDirectoryAt)
-		fresh->selected =
-			ListWindow_reload(fresh->entries->count, GameList_rowCountAt(true), sel, &fresh->start, &fresh->end);
+		Directory* fresh;
+		if (next == old_tab) {
+			fresh = buildRoot(next, 0, 0, 0);
+			// buildRoot's window from the top, re-windowed so the kept selection shows (as reloadDirectoryAt)
+			fresh->selected = ListWindow_reload(fresh->entries->count, GameList_rowCountAt(true), keep_selected,
+												&fresh->start, &fresh->end);
+		} else {
+			// the neighbour reopens where it was left (its hint's row and window), as a tab switch would
+			const MenuTabSlot* hint = &slots[next];
+			fresh = hint->hint ? buildRoot(next, hint->selected, hint->start, hint->end) : buildRoot(next, 0, 0, 0);
+		}
 		if (next != old_tab) {
 			// the current tab vanished (e.g. its last ROM was deleted from inside Consoles › GBA): a list pushed
 			// over it belongs to that tab, so it can't stay over another tab's root -- B would land on the wrong
@@ -338,47 +394,66 @@ void MenuTabs_clearHomeLaunch(void) {
 	home_launch = false;
 }
 
+// MENU_TAB_PATH as read once at boot (initialTab, savedHomeLaunch and savedPush all ask): saveState writes it only
+// right before nextui exits for a launch or a restart, and drops this copy when it does, so it can't go stale.
+static struct {
+	bool read;
+	char key[64];
+	char* second; // into key, or NULL
+} saved_state;
+
 void MenuTabs_saveState(void) {
+	saved_state.read = false;
 	if (home_launch && current == MENU_TAB_HOME)
 		putFile(MENU_TAB_PATH, "home\nlaunch\n");
-	else if (stack && stack->count > 1 && !MenuTabs_isVisible(MENU_TAB_TOOLS) &&
-			 exactMatch(((Directory*)stack->items[1])->path, TOOLS_PATH)) {
-		// the context menu's Tools list pushed over a tab (Tools tab hidden): the tab it was pushed over plus a
-		// "tools" line, so boot reopens that tab and loadLast re-pushes Tools on the tool's row
+	else if (pushedTab() != MENU_TAB_HOME) {
+		// a hidden tab's list pushed over a tab by the context menu: the tab it was pushed over plus the pushed
+		// tab's key, so boot reopens that tab and loadLast re-pushes the list
 		char state[64];
-		snprintf(state, sizeof(state), "%s\ntools\n", MenuTabs_key(current));
+		snprintf(state, sizeof(state), "%s\n%s\n", MenuTabs_key(current), MenuTabs_key(pushedTab()));
 		putFile(MENU_TAB_PATH, state);
 	} else
 		putFile(MENU_TAB_PATH, (char*)MenuTabs_key(current));
 	home_launch = false;
 }
 
-// MENU_TAB_PATH split into the tab key and its optional second line.
-static void readSavedState(char* key, size_t key_size, char** second) {
-	key[0] = '\0';
-	*second = NULL;
-	if (exists(MENU_TAB_PATH))
-		getFile(MENU_TAB_PATH, key, key_size);
-	char* nl = strchr(key, '\n');
-	if (nl) {
-		*nl++ = '\0';
-		trimTrailingNewlines(nl);
-		*second = nl;
+// MENU_TAB_PATH split into the tab key and its optional second line (both into the cached copy).
+static void readSavedState(const char** key, const char** second) {
+	if (!saved_state.read) {
+		saved_state.read = true;
+		saved_state.key[0] = '\0';
+		saved_state.second = NULL;
+		if (exists(MENU_TAB_PATH))
+			getFile(MENU_TAB_PATH, saved_state.key, sizeof(saved_state.key));
+		char* nl = strchr(saved_state.key, '\n');
+		if (nl) {
+			*nl++ = '\0';
+			trimTrailingNewlines(nl);
+			saved_state.second = nl;
+		}
+		trimTrailingNewlines(saved_state.key);
 	}
-	trimTrailingNewlines(key);
+	*key = saved_state.key;
+	*second = saved_state.second;
 }
 
-bool MenuTabs_savedToolsPush(void) {
-	char key[64];
-	char* second;
-	readSavedState(key, sizeof(key), &second);
-	return second && strcmp(second, "tools") == 0;
+// The pushed tab a second line names (Consoles, Collections or Tools), else MENU_TAB_HOME.
+static MenuTabId pushedFromLine(const char* second) {
+	MenuTabId id = MENU_TAB_HOME;
+	if (!second || !MenuTabs_parseKey(second, &id))
+		return MENU_TAB_HOME;
+	return id;
+}
+
+MenuTabId MenuTabs_savedPush(void) {
+	const char *key, *second;
+	readSavedState(&key, &second);
+	return pushedFromLine(second);
 }
 
 bool MenuTabs_savedHomeLaunch(void) {
-	char key[64];
-	char* second;
-	readSavedState(key, sizeof(key), &second);
+	const char *key, *second;
+	readSavedState(&key, &second);
 	MenuTabId saved = MENU_TAB_HOME;
 	return MenuTabs_parseKey(key, &saved) && saved == MENU_TAB_HOME && second && strcmp(second, "launch") == 0;
 }
@@ -387,7 +462,7 @@ bool MenuTabs_savedHomeLaunch(void) {
 // below the card root, is pinned (a ROM launched from a pinned game folder).
 static bool homeOwnsPath(const char* path) {
 	size_t root_len = strlen(SDCARD_PATH);
-	if (!prefixMatch(SDCARD_PATH, path))
+	if (!MenuTabs_underPath(path, SDCARD_PATH))
 		return false;
 	char p[MAX_PATH];
 	snprintf(p, sizeof(p), "%s", path);
@@ -415,9 +490,8 @@ static bool savedOwnsPath(MenuTabId saved, const char* last_path, MenuTabId path
 }
 
 MenuTabId MenuTabs_initialTab(const char* last_path) {
-	char key[64];
-	char* second;
-	readSavedState(key, sizeof(key), &second);
+	const char *key, *second;
+	readSavedState(&key, &second);
 	MenuTabId saved = MENU_TAB_HOME;
 	bool saved_valid = MenuTabs_parseKey(key, &saved);
 	bool home_launched = saved_valid && saved == MENU_TAB_HOME && second && strcmp(second, "launch") == 0;
@@ -427,9 +501,10 @@ MenuTabId MenuTabs_initialTab(const char* last_path) {
 	if (has_path) {
 		MenuTabPaths p = tabPaths();
 		path_tab = MenuTabs_forPath(last_path, &p);
-		// a tool from the Tools list pushed over the saved tab: boot reopens that tab (loadLast re-pushes Tools)
-		bool tools_push = second && strcmp(second, "tools") == 0 && path_tab == MENU_TAB_TOOLS && !MenuTabs_isVisible(MENU_TAB_TOOLS);
-		owns = home_launched || tools_push || (saved_valid && savedOwnsPath(saved, last_path, path_tab));
+		// a launch from a hidden tab's list pushed over the saved tab: boot reopens that tab (loadLast re-pushes the list)
+		MenuTabId pushed = pushedFromLine(second);
+		bool list_push = pushed != MENU_TAB_HOME && path_tab == pushed && !MenuTabs_isVisible(pushed);
+		owns = home_launched || list_push || (saved_valid && savedOwnsPath(saved, last_path, path_tab));
 	}
 	return MenuTabs_pickInitial(tabs, tab_count, saved_valid, saved, has_path, path_tab, owns);
 }
@@ -442,15 +517,14 @@ MenuTabId MenuTabs_initialTab(const char* last_path) {
 // current label wears the selection plate (12 dp past the word each side, 5 dp
 // above and below) and the underline hides; the words keep their positions.
 
-// The tab row keeps the page title's size whatever the UI scale (UI scale enlarges the content, not the tabs): its
-// font is the page title's (UI_pageTitleFont) and its measures dp at CHROME_SCALE, the Brick's physical size on every panel
-#define TAB_LABEL_GAP NX_CHROME_DP(20)	 // pixels between labels
-#define TAB_UNDERLINE_H NX_CHROME_DP(3)	 // underline height in pixels
-#define TAB_EDGE NX_CHROME_DP(16)		 // scroll margin + edge fade width
-#define TAB_PLATE_PAD_X NX_CHROME_DP(12) // the plate past the word, each side
-#define TAB_PLATE_PAD_Y NX_CHROME_DP(5)	 // and above and below
-#define TAB_DIM_ALPHA 97				 // 38%: labels of the other tabs
-#define TAB_GLIDE_MS 240				 // underline glide, eased with UI_easeStandard
+// The tab row keeps the page title's size: its font is the page title's (UI_pageTitleFont) and its measures dp
+#define TAB_LABEL_GAP NX_DP(20)	  // pixels between labels
+#define TAB_UNDERLINE_H NX_DP(3)  // underline height in pixels
+#define TAB_EDGE NX_DP(16)		  // scroll margin + edge fade width
+#define TAB_PLATE_PAD_X NX_DP(12) // the plate past the word, each side
+#define TAB_PLATE_PAD_Y NX_DP(5)  // and above and below
+#define TAB_DIM_ALPHA 97		  // 38%: labels of the other tabs
+#define TAB_GLIDE_MS 240		  // underline glide, eased with UI_easeStandard
 
 // Underline glide (strip coordinates). Position = lerp(from, to, UI_easeStandard(elapsed / 240 ms)).
 static struct {
@@ -467,15 +541,16 @@ static struct {
 	TTF_Font* font;
 	int off, cur, count, w, h;
 	MenuTabId ids[MENU_TAB_COUNT];
-	int scale;
+	float scale;
 	bool focused; // the current label is left out (the plate draws it)
 } strip;
 
 // The last layoutLabels result, so a dirty frame doesn't re-measure the labels: keyed on the font, the visible tabs
-// (each id's label is a fixed string) and FIXED_SCALE (a system-font reload follows a scale change).
+// (each id's label is a fixed string) and FIXED_SCALE.
 static struct {
 	TTF_Font* font;
-	int count, scale, width;
+	int count, width;
+	float scale;
 	MenuTabId ids[MENU_TAB_COUNT];
 	int xs[MENU_TAB_COUNT], ws[MENU_TAB_COUNT];
 } label_layout;
@@ -631,7 +706,8 @@ static struct {
 	SDL_Surface* surf;
 	TTF_Font* font;
 	MenuTabId id;
-	int w, h, scale, text_y;
+	int w, h, text_y;
+	float scale;
 	uint64_t key; // the accent and its ink
 } plate;
 
@@ -684,15 +760,16 @@ static SDL_Surface* plateSurface(TTF_Font* f, MenuTabId id, int pw, int ph, int 
 }
 
 void MenuTabs_renderRow(SDL_Surface* screen, int ow) {
-	if (tab_count <= 0)
+	// one tab left (the others hidden or empty): no row, a lone label has nothing to switch to
+	if (tab_count <= 1)
 		return;
 
-	// the row fills the top bar: both the default scale's height whatever the UI scale
+	// the row fills the top bar
 	int bar_h = BAR_HEIGHT;
 	int row_h = bar_h;
 	int row_y = 0;
-	int band_h = row_h - TAB_UNDERLINE_H * 2;	// labels centre above the underline
-	int left = NX_NATIVE_DP(NX_MENU_GUTTER_DP); // the first label on the 24 dp gutter (§5), where the List rows' text starts
+	int band_h = row_h - TAB_UNDERLINE_H * 2; // labels centre above the underline
+	int left = NX_DP(NX_MENU_GUTTER_DP);	  // the first label on the 24 dp gutter (§5), where the List rows' text starts
 	int right_limit = screen->w - ow - SCALE1(PADDING);
 	int band_w = right_limit - left;
 	if (band_w <= 0)
@@ -781,7 +858,7 @@ void MenuTabs_renderRow(SDL_Surface* screen, int ow) {
 	} else {
 		int ux, uw;
 		underlineNow(&ux, &uw);
-		SDL_FillRect(screen, &(SDL_Rect){base + ux, row_y + row_h - TAB_UNDERLINE_H - CHROME1(2), uw, TAB_UNDERLINE_H},
+		SDL_FillRect(screen, &(SDL_Rect){base + ux, row_y + row_h - TAB_UNDERLINE_H - SCALE1(2), uw, TAB_UNDERLINE_H},
 					 accentOpaque(screen->format));
 	}
 

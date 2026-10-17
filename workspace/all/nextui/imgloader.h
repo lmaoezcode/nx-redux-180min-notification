@@ -24,12 +24,8 @@ extern SDL_Surface* folderbgbmp;
 extern SDL_Surface* thumbbmp;
 
 // Synchronization primitives (owned by imgloader.c)
-extern SDL_mutex* bgMutex;	  // protects: folderbgbmp, folderbgchanged
-extern SDL_mutex* thumbMutex; // protects: thumbbmp, thumbchanged
-
-// Shared state flags (see mutex comments above for which mutex protects each)
-extern int folderbgchanged;
-extern int thumbchanged;
+extern SDL_mutex* bgMutex;	  // protects: folderbgbmp
+extern SDL_mutex* thumbMutex; // protects: thumbbmp
 
 // Atomic state accessors
 void setNeedDraw(int v);
@@ -43,11 +39,22 @@ void cleanupImageLoaderPool(void);
 void startLoadFolderBackground(const char* imagePath, BackgroundLoadedCallback callback);
 void onBackgroundLoaded(SDL_Surface* surface);
 
-// Thumbnail loading
-bool startLoadThumb(const char* thumbpath);
-// Drop any cached thumbnail (or cached miss) for `path` so the next
+// Thumbnail loading. `compose` (THUMB_COMPOSE_*) is how the List shows the picture: the screenshot's faded
+// background (ArtBg_compose, at half size) or the hard-edged fitted box at full size (ArtBg_composeFit, Layouts >
+// List art = Mix, 2D box art or Wheel).
+enum { THUMB_COMPOSE_BG = 0,
+	   THUMB_COMPOSE_FIT = 1 };
+bool startLoadThumb(const char* thumbpath, int compose);
+// Decode `thumbpath` into the thumbnail cache ahead of need (the List's neighbours, in idle time), without showing it:
+// only while the loader is idle, so it never displaces or delays the selection's own picture. A step onto it then
+// swaps the decoded picture in, with no decode running under the pill's glide. True while there is still something
+// to wait for (queued now, or the loader busy); false once it is cached (or can't be).
+bool thumbPrefetch(const char* thumbpath, int compose);
+// Drop any cached thumbnail (or cached miss) for `path`, in both compose modes, so the next
 // startLoadThumb reads it fresh from disk. Safe if not present.
 void thumbCacheInvalidate(const char* path);
+// Drop every cached miss (Refresh Roms: art added on the card since must show); decoded pictures stay.
+void thumbCacheForgetMisses(void);
 int thumbCheckAsyncLoaded(void);
 
 // Layer render helpers shared by the main render loop (moved from nextui.c)
@@ -58,6 +65,9 @@ void updateBackgroundLayer(SDL_Surface* blackBG);
 // the same row) — resolveAndLoadBackground's change-detection sees nothing new
 // and would leave the layer empty until the selection moves.
 void requestBackgroundReupload(void);
+// True while LAYER_BACKGROUND has something to take: a reupload asked for, or new art (or none) still to show.
+// Safe to poll from the UI thread without the locks.
+bool backgroundLayerPending(void);
 void renderThumbnail(int reset_changed, bool hide);
 
 #endif // IMGLOADER_H

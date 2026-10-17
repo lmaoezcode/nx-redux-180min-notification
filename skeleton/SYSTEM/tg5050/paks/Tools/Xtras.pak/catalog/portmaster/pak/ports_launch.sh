@@ -57,7 +57,8 @@ fi
 PM_TOOL="$SDCARD_PATH/Tools/PortMaster.pak/launch.sh"
 DI="$EMU_DIR/device_info.txt"
 if { { [ -f "$EMU_DIR/control.txt" ] && ! grep -q 'NX Redux: exFAT/FAT32 compat' "$EMU_DIR/control.txt"; } \
-     || { grep -q '^export DEVICE_CAPABILITIES=' "$DI" 2>/dev/null && ! grep -q 'NX Redux: TrimUI capability' "$DI"; }; } \
+     || { grep -q '^export DEVICE_CAPABILITIES=' "$DI" 2>/dev/null && ! grep -q 'NX Redux: TrimUI capability' "$DI"; } \
+     || grep -q '^CUR_TTY="/dev/fd/1"' "$EMU_DIR/mod_TrimUI.txt" 2>/dev/null; } \
     && [ -f "$PM_TOOL" ] && grep -q -- '--patch-only' "$PM_TOOL"; then
     echo "PortMaster files are unpatched: applying the NxRedux patches"
     sh "$PM_TOOL" --patch-only
@@ -171,6 +172,55 @@ add_input_udev_rule() {
     done
 }
 
+# The CrossMix preview of PortMaster's Weston runtime (weston_pkg_0.2 with
+# "Westonwrap 0.2.8 (Preview 1)", which NX Redux bundled in libs.zip until
+# it stopped shipping a runtime; update.sh removes it from cards) runs a
+# bare `udevadm trigger` on CFW_NAME TrimUI: a change event for every device,
+# the SD card included. The stock /etc/mdev.conf handles any mmcblk1 event but
+# "add" as a removal (sdcard_remove: umount -l, rm /mnt/SDCARD), so the card
+# vanished mid-launch and the port died on a black screen. Put a udevadm first
+# on PATH for the port that narrows an unfiltered trigger to input devices, as
+# an add (what add_input_udev_rule does); every other call goes to the real one.
+NX_PORT_SHIMS="/tmp/nx_port_shims"
+add_udevadm_shim() {
+    local real
+    real="$(command -v udevadm)" || return 0
+    mkdir -p "$NX_PORT_SHIMS" || return 0
+    cat >"$NX_PORT_SHIMS/udevadm" <<SHIM
+#!/bin/sh
+if [ "\$1" = trigger ]; then
+    case " \$* " in
+        *" -s"*|*" --subsystem-match"*|*" -k"*|*" --kernel"*|*" -p"*|*" --property-match"*|*" -y"*|*" --sysname-match"*) ;;
+        *) shift; exec "$real" trigger --action=add --subsystem-match=input "\$@" ;;
+    esac
+fi
+exec "$real" "\$@"
+SHIM
+    chmod +x "$NX_PORT_SHIMS/udevadm" && export PATH="$NX_PORT_SHIMS:$PATH"
+}
+
+# Per-port workarounds live in the system's copy of this catalog,
+# pak/port_fixes/<name>.sh, so a system update refreshes them. Each file
+# defines <name>_pre, run before the port, and may define <name>_retry, run
+# after it: it returns 0 when it repaired a failed run and the port should run
+# once more. Each fix checks for itself whether the launched port is its own.
+PORT_FIXES_DIR="$SYSTEM_PATH/paks/Tools/Xtras.pak/catalog/portmaster/pak/port_fixes"
+run_port_fixes() { # $1 = pre | retry; returns 0 when a retry hook asks for a re-run
+    local f hook rerun=1
+    for f in "$PORT_FIXES_DIR"/*.sh; do
+        [ -f "$f" ] || continue
+        hook="$(basename "$f" .sh)_$1"
+        command -v "$hook" >/dev/null 2>&1 || . "$f"
+        command -v "$hook" >/dev/null 2>&1 || continue
+        if [ "$1" = retry ]; then
+            "$hook" && rerun=0
+        else
+            "$hook"
+        fi
+    done
+    return "$rerun"
+}
+
 main() {
     # armhf-only ports need an ELF interpreter which stock TrimUI does not
     # provide. Explain the incompatibility before spawning helpers or mounts.
@@ -204,6 +254,13 @@ main() {
     # GPU: lock to performance for port games (many use OpenGL/SDL2 rendering)
     echo performance >/sys/devices/platform/soc@3000000/1800000.gpu/devfreq/1800000.gpu/governor 2>/dev/null
 
+    # Launch Options (per-game cores / CPU / GPU, Auto = the lines above)
+    if [ -f "$SYSTEM_PATH/bin/nx_launch_opts.sh" ]; then
+        . "$SYSTEM_PATH/bin/nx_launch_opts.sh"
+        nx_launch_opts_load PORTS "$ROM_PATH"
+        nx_launch_opts_apply
+    fi
+
     mkdir -p "$PORTS_DIR"
 
     # Bind mount .ports to temp dir so port scripts can find game data
@@ -235,6 +292,8 @@ main() {
     set_controller_layout "$NX_BUTTON_LAYOUT"
 
     add_input_udev_rule
+    add_udevadm_shim
+    run_port_fixes pre
 
     # Start power button sleep/poweroff handler
     sleepmon.elf &
@@ -249,6 +308,7 @@ main() {
     SYNC_PID=$!
 
     bash "$ROM_PATH"
+    run_port_fixes retry && bash "$ROM_PATH"
 }
 
 main "$@"

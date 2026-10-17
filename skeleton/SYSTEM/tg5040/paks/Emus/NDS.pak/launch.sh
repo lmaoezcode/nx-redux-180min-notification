@@ -40,7 +40,7 @@ main() {
 
     # Set performance mode for NDS emulation
     echo performance >/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-    echo 1608000 >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+    cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq >/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
 
     # Determine device-specific config directory
     if [ "$DEVICE" = "brick" ]; then
@@ -71,6 +71,13 @@ main() {
             cp "$DEVICE_PAK_DIR/config/drastic.cf2" "$DEVICE_CONFIG_PATH/" 2>/dev/null || true
         fi
         touch "$DEVICE_CONFIG_PATH/.initialized"
+    fi
+
+    # Layout/theme settings: the hook rewrites resources/settings.json on exit
+    # and cannot save without it; the release ships only the default, so an
+    # update never resets the player's copy
+    if [ ! -f "$EMU_DIR/resources/settings.json" ]; then
+        cp "$EMU_DIR/resources/settings.default.json" "$EMU_DIR/resources/settings.json" 2>/dev/null || true
     fi
 
     # Move any leftover cheats to centralized location

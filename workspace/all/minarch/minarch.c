@@ -51,6 +51,7 @@
 #include <SDL2/SDL.h>
 #include <rcheevos/rc_client.h>
 #include "ma_emutime.h"
+#include "ma_present.h"
 
 ///////////////////////////////////////
 
@@ -250,6 +251,22 @@ static void daily_playtime_pause(unsigned reason, int pause) {
 		DailyPlayTime_clientPause(daily_pause_reasons != 0);
 }
 
+// gpSP's real link cable waits for the peer inside retro_run, which the Auto
+// governor reads as idle and clocks down: both games slow down. While link
+// traffic flows run at Performance; the user's setting returns when it stops.
+static bool link_cpu_boost;
+static void updateLinkCpuBoost(void) {
+	bool want = GBALink_lockstepBusy();
+	if (want == link_cpu_boost)
+		return;
+	link_cpu_boost = want;
+	if (want)
+		PWR_setCPUSpeed(CPU_SPEED_PERFORMANCE);
+	else
+		setOverclock(overclock);
+	LOG_info("GBALink: link cable %s, CPU %s\n", want ? "busy" : "quiet", want ? "Performance" : "back to setting");
+}
+
 int main(int argc, char* argv[]) {
 	if (argc >= 4 && argc <= 5 && !strcmp(argv[1], "--dump-options"))
 		return OptsDump_run(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
@@ -348,7 +365,7 @@ int main(int argc, char* argv[]) {
 	{
 		char* rom_path_for_ra = game.tmp_path[0] ? game.tmp_path : game.path;
 		RA_setRecordedRomPath(game.path);
-		RA_loadGame(rom_path_for_ra, game.data, game.size, core.tag);
+		RA_loadGame(rom_path_for_ra, game.data, game.size, core.tag, core.name);
 	}
 
 	// a netplay session starts from a clean boot on both sides
@@ -363,8 +380,13 @@ int main(int argc, char* argv[]) {
 	// alone would skip Menu_quit/Notification_quit/QuitSettings/Video_cleanup,
 	// all of which pair with initialization done above.
 	if (NetplayBoot_startFromEnv(core.name) != 0) {
-		Menu_message("Netplay connection failed.", (char*[]){"A", "OKAY", NULL});
+		const char* why = NetplayBoot_lastError();
+		Menu_message((char*)(why ? why : "Netplay connection failed."), (char*[]){"A", "OKAY", NULL});
 		quit = 1;
+	} else {
+		// session on the device's own save: its old auto-resume state would
+		// resume to before the session (no-op for plain launches and clients)
+		Menu_dropAutoResumeForSession();
 	}
 
 	// we dont need five second updates while ingame, and wifi status isnt displayed either
@@ -415,6 +437,8 @@ int main(int argc, char* argv[]) {
 
 		// Netplay: synchronize inputs BEFORE running the core. If we're still waiting
 		// on the peer this frame, poll input (so menu/quit stay responsive) and skip it.
+		const int16_t sticks[4] = {(int16_t)pad.laxis.x, (int16_t)pad.laxis.y, (int16_t)pad.raxis.x, (int16_t)pad.raxis.y};
+		Netplay_setLocalAnalog(sticks);
 		if (!Netplay_update((uint16_t)Input_getButtons(), core.serialize_size, core.serialize, core.unserialize)) {
 			input_poll_callback();
 			continue;
@@ -422,6 +446,12 @@ int main(int argc, char* argv[]) {
 
 		GBALink_update();
 		GBALink_pollAndDeliverPackets();
+		updateLinkCpuBoost();
+		if (GBALink_peerPaused()) { // the other player's menu is open: wait with them (frozen frame)
+			input_poll_callback();
+			SDL_Delay(10);
+			continue;
+		}
 		GBLink_pollConnectionState(); // GB Link: detect connect/disconnect from the socket table
 
 		// the other player left on purpose: end now, not at the core's timeout
@@ -520,10 +550,14 @@ int main(int argc, char* argv[]) {
 			}
 		}
 
-		Notification_renderToLayer(5); // Always call - handles cleanup when inactive
+		if (Present_lockFrameState()) {	   // the present thread may be uploading the layer
+			Notification_renderToLayer(5); // Always call - handles cleanup when inactive
+			Present_unlockFrameState();
+		}
 
 		if (has_pending_opt_change) {
 			has_pending_opt_change = 0;
+			Present_stop();
 			if (Core_updateAVInfo()) {
 				SND_resetAudio(core.sample_rate, core.fps);
 				SetVolume(GetVolume());
@@ -535,12 +569,18 @@ int main(int argc, char* argv[]) {
 			if (Netplay_isConnected()) {
 				Netplay_pause();
 			}
+			// A GBA link peer stops with us for the whole menu, setup and
+			// teardown included: the wireless adapter gives up after ~0.5 s
+			// of one-sided silence.
+			GBALink_setPaused(true);
 			PWR_updateFrequency(PWR_UPDATE_FREQ, 1);
 			daily_playtime_pause(1, 1);
 			Menu_loop();
 			daily_playtime_pause(1, 0);
 			PlayTimeTracker_resume(&playtime_tracker, SDL_GetTicks()); // quick-menu time is not play time
-			EmuTime_reset(); // emulated-time pacing restarts after the menu
+			GBALink_setPaused(false); // no-op once the menu left the session
+			link_cpu_boost = false;	  // the menu restored the user's speed: boost again if still busy
+			EmuTime_reset();		  // emulated-time pacing restarts after the menu
 			// Process RA async operations while menu is shown
 			RA_idle();
 			if (Netplay_isPaused()) {
@@ -567,6 +607,7 @@ int main(int argc, char* argv[]) {
 
 		hdmimon();
 	}
+	Present_stop();
 	// leaving (menu, quit shortcut, power): tell the other player right away
 	if (CoreNetplay_isActive())
 		CoreNetplay_byeSend(CORE_NETPLAY_BYE_PORT);
@@ -611,7 +652,7 @@ finish:
 	//SND_quit();
 	PAD_quit();
 	GFX_quit();
-	SDL_WaitThread(screenshotsavethread, NULL);
+	Menu_waitScreenshotSave();
 	// Last: QuitSettings() munmaps the libmsettings shared memory. It used to run
 	// right after Notification_quit(), while the VIB_thread (stopped only by
 	// VIB_quit() above) could still be polling GetRumble() for an active burst;

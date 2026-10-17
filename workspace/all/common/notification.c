@@ -193,7 +193,11 @@ void Notification_push(NotificationType type, const char* message, SDL_Surface* 
 	strncpy(n->message, message, NOTIFICATION_MAX_MESSAGE - 1);
 	n->message[NOTIFICATION_MAX_MESSAGE - 1] = '\0';
 	n->icon = icon;
-	n->start_time = SDL_GetTicks();
+	// the clock starts on the first frame it is actually drawn (see
+	// Notification_update): one pushed while the in-game menu is open, e.g.
+	// a RetroAchievements sync finishing there, must not expire unseen
+	n->start_time = 0;
+	n->shown = false;
 
 	// Use RA-specific duration for achievement notifications
 	if (type == NOTIFICATION_ACHIEVEMENT) {
@@ -235,6 +239,10 @@ void Notification_update(uint32_t now) {
 	// Check each notification for expiration
 	for (int i = 0; i < notification_count; i++) {
 		Notification* n = &notifications[i];
+		if (!n->shown) {
+			n->shown = true;
+			n->start_time = now;
+		}
 		uint32_t elapsed = now - n->start_time;
 
 		if (n->state == NOTIFICATION_STATE_VISIBLE && elapsed >= n->duration_ms) {
@@ -252,7 +260,7 @@ void Notification_update(uint32_t now) {
 
 // Render system indicator (top-right)
 static void render_system_indicator(void) {
-	// the indicator's fixed size (INDICATOR_SCALE), whatever the UI scale
+	// the indicator's own size (INDICATOR_SCALE)
 	int indicator_width, indicator_height;
 	GFX_hardwareIndicatorSize(&indicator_width, &indicator_height);
 	int indicator_x = screen_width - SCALE1(PADDING) - indicator_width;

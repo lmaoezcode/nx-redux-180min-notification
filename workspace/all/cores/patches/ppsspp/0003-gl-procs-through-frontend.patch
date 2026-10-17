@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # Resolve GLES3/extension entry points through the libretro frontend instead of
 # eglGetProcAddress (PowerVR EGL 1.4 returns NULL for core ES3 functions, so GLES3
 # was misdetected and depth copies asserted), fall back glCopyImageSubDataOES to

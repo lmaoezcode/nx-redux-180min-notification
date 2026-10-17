@@ -10,7 +10,8 @@ static const char* tab_keys[MENU_TAB_COUNT] = {"home", "consoles", "collections"
 
 int MenuTabs_visible(const MenuTabInputs* in, MenuTabId out[MENU_TAB_COUNT]) {
 	int n = 0;
-	out[n++] = MENU_TAB_HOME;
+	if (!in->hide_home)
+		out[n++] = MENU_TAB_HOME;
 	if (in->show_consoles && in->has_consoles)
 		out[n++] = MENU_TAB_CONSOLES;
 	if (in->show_collections && in->has_collections)
@@ -18,6 +19,8 @@ int MenuTabs_visible(const MenuTabInputs* in, MenuTabId out[MENU_TAB_COUNT]) {
 	// simple mode keeps Settings reachable whatever the Tools toggle says
 	if (in->simple_mode ? in->has_settings : (in->show_tools && in->has_tools))
 		out[n++] = MENU_TAB_TOOLS;
+	if (n == 0) // Home hidden and nothing else to show: keep it, the menu needs a tab
+		out[n++] = MENU_TAB_HOME;
 	return n;
 }
 
@@ -45,22 +48,23 @@ int MenuTabs_resolve(const MenuTabId* tabs, int count, MenuTabId current) {
 	return count > 0 ? count - 1 : 0;
 }
 
-// path == base, or path continues below base with a '/'
-static int underPath(const char* path, const char* base) {
-	if (!base || !base[0])
-		return 0;
+bool MenuTabs_underPath(const char* path, const char* base) {
+	if (!path || !base || !base[0])
+		return false;
 	size_t n = strlen(base);
+	if (base[n - 1] == '/') // a base given with its trailing slash: the slash is the boundary
+		return strncmp(path, base, n) == 0;
 	return strncmp(path, base, n) == 0 && (path[n] == '\0' || path[n] == '/');
 }
 
 MenuTabId MenuTabs_forPath(const char* path, const MenuTabPaths* paths) {
 	if (!path)
 		return MENU_TAB_HOME;
-	if (underPath(path, paths->roms))
+	if (MenuTabs_underPath(path, paths->roms))
 		return MENU_TAB_CONSOLES;
-	if (underPath(path, paths->collections))
+	if (MenuTabs_underPath(path, paths->collections))
 		return MENU_TAB_COLLECTIONS;
-	if (underPath(path, paths->tools) || underPath(path, paths->sys_tools))
+	if (MenuTabs_underPath(path, paths->tools) || MenuTabs_underPath(path, paths->sys_tools))
 		return MENU_TAB_TOOLS;
 	return MENU_TAB_HOME;
 }
@@ -112,7 +116,7 @@ MenuTabId MenuTabs_pickInitial(const MenuTabId* tabs, int count, bool saved_vali
 		return saved;
 	if (has_path && MenuTabs_indexOf(tabs, count, path_tab) >= 0)
 		return path_tab;
-	return MENU_TAB_HOME; // always visible; also the cold-boot tab
+	return count > 0 ? tabs[0] : MENU_TAB_HOME; // the cold-boot tab: Home, unless it is hidden
 }
 
 void MenuTabs_clampWindow(int count, int rows, int* selected, int* start, int* end) {
@@ -121,10 +125,16 @@ void MenuTabs_clampWindow(int count, int rows, int* selected, int* start, int* e
 		count = 0;
 	if (rows < 1)
 		rows = 1;
-	// buildRoot's rule: a hint that no longer fits the list starts over at the top
-	if (sel < 0 || sel >= count || last > count || first < 0 || first > sel || (last && sel >= last)) {
+	if (sel < 0 || sel >= count) {
+		// buildRoot's rule: a selection that no longer fits the list starts over at the top
 		sel = 0;
 		first = 0;
+		last = 0;
+	} else if (last > count || first < 0 || first > sel || (last && sel >= last)) {
+		// the row still exists but its window doesn't fit (the list shrank under it, e.g. a pin removed
+		// elsewhere): rebuilt below around the selection, from the same first row where it can
+		if (first < 0 || first > sel)
+			first = sel;
 		last = 0;
 	}
 	int visible = count < rows ? count : rows;

@@ -1,6 +1,7 @@
 #include "defines.h"
 #include "api.h"
 #include "flip_schedule.h"
+#include "ui_pill_cap.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -112,14 +113,7 @@ const char* GFX_getArabicFontPath(void) {
 
 // The Arabic-font counterpart of a primary size-font, or of a font the registered resolver knows (NULL if
 // the Arabic font failed to load or `primary` is unknown).
-// The button hint bar's label font at CHROME_SCALE (the Brick's physical size, whatever the UI scale), and its
-// Arabic counterpart; opened with the other system fonts.
-static TTF_Font* hint_tiny_chrome = NULL;
-static TTF_Font* hint_tiny_chrome_ar = NULL;
-
 TTF_Font* GFX_fallbackFontFor(TTF_Font* primary) {
-	if (primary && primary == hint_tiny_chrome)
-		return hint_tiny_chrome_ar;
 	if (primary == font.xlarge)
 		return font_ar.xlarge;
 	if (primary == font.title)
@@ -347,20 +341,99 @@ typedef struct {
 static TextCacheEntry text_cache[TEXT_CACHE_SIZE];
 static uint32_t text_cache_lru = 0;
 
+// ---- Cached text fitting ---------------------------------------------------
+// A list row's pill width is its text measured, and a text too wide for its row truncated (a measure per candidate
+// length): every visible row, every frame of a glide or a held D-pad. Kept per (font, text, room), so a row the list
+// keeps showing isn't measured again; dropped with the text cache (a font reload).
+#define FIT_CACHE_SIZE 64
+typedef struct {
+	TTF_Font* font;
+	int avail, padding;
+	Uint32 hash;
+	char text[256];
+	int raw_w;		// the text's own width
+	char fit[256];	// the text as it fits the room (itself when it does)
+	bool truncated; // fit is the truncated text
+	uint32_t lru;
+} FitCacheEntry;
+static FitCacheEntry fit_cache[FIT_CACHE_SIZE];
+static uint32_t fit_cache_lru = 0;
+
+static void fitCacheForget(TTF_Font* font) {
+	for (int i = 0; i < FIT_CACHE_SIZE; i++)
+		if (!font || fit_cache[i].font == font)
+			fit_cache[i] = (FitCacheEntry){0};
+	if (!font)
+		fit_cache_lru = 0;
+}
+
+bool GFX_fitTextCached(TTF_Font* font, const char* text, char* out, int avail, int padding, int* raw_w) {
+	size_t len = text ? strlen(text) : 0;
+	if (!font || !text || len >= sizeof(fit_cache[0].text)) { // uncached: as measured and truncated directly
+		int w = 0;
+		GFX_measureText(font, text, &w, NULL);
+		if (raw_w)
+			*raw_w = w;
+		if (w + padding > avail) {
+			GFX_truncateText(font, text, out, avail, padding);
+			return true;
+		}
+		strncpy(out, text ? text : "", 255);
+		out[255] = '\0';
+		return false;
+	}
+	Uint32 hash = 2166136261u;
+	for (const unsigned char* c = (const unsigned char*)text; *c; c++)
+		hash = (hash ^ *c) * 16777619u;
+	FitCacheEntry* slot = &fit_cache[0];
+	for (int i = 0; i < FIT_CACHE_SIZE; i++) {
+		FitCacheEntry* e = &fit_cache[i];
+		if (e->font == font && e->hash == hash && e->avail == avail && e->padding == padding &&
+			strcmp(e->text, text) == 0) {
+			e->lru = ++fit_cache_lru;
+			if (raw_w)
+				*raw_w = e->raw_w;
+			strcpy(out, e->fit);
+			return e->truncated;
+		}
+		if (e->lru < slot->lru)
+			slot = e;
+	}
+	FitCacheEntry e = {.font = font, .avail = avail, .padding = padding, .hash = hash};
+	memcpy(e.text, text, len + 1);
+	GFX_measureText(font, text, &e.raw_w, NULL);
+	e.truncated = e.raw_w + padding > avail;
+	if (e.truncated)
+		GFX_truncateText(font, text, e.fit, avail, padding);
+	else
+		memcpy(e.fit, text, len + 1);
+	e.lru = ++fit_cache_lru;
+	*slot = e;
+	if (raw_w)
+		*raw_w = e.raw_w;
+	strcpy(out, e.fit);
+	return e.truncated;
+}
+
 static void GFX_clearTextCache(void) {
 	for (int i = 0; i < TEXT_CACHE_SIZE; i++) {
-		if (text_cache[i].surf)
+		if (text_cache[i].surf) {
+			PLAT_freeSurfaceTexture(text_cache[i].surf); // a List row drew it as a GPU sprite
 			SDL_FreeSurface(text_cache[i].surf);
+		}
 		text_cache[i] = (TextCacheEntry){0};
 	}
 	text_cache_lru = 0;
+	fitCacheForget(NULL);
 }
 
 void GFX_forgetFontText(TTF_Font* font) {
 	if (!font)
 		return;
+	fitCacheForget(font);
 	for (int i = 0; i < TEXT_CACHE_SIZE; i++) {
 		if (text_cache[i].surf && text_cache[i].font == font) {
+			PLAT_freeSurfaceTexture(text_cache[i].surf); // a List row drew it as a GPU sprite
 			SDL_FreeSurface(text_cache[i].surf);
 			text_cache[i] = (TextCacheEntry){0};
 		}
@@ -397,8 +470,10 @@ SDL_Surface* GFX_getCachedText(TTF_Font* font, const char* text, SDL_Color color
 		return NULL;
 
 	int slot = (free_slot >= 0) ? free_slot : lru_slot;
-	if (text_cache[slot].surf)
+	if (text_cache[slot].surf) {
+		PLAT_freeSurfaceTexture(text_cache[slot].surf); // a List row drew it as a GPU sprite
 		SDL_FreeSurface(text_cache[slot].surf);
+	}
 	text_cache[slot].font = font;
 	text_cache[slot].color = color;
 	strncpy(text_cache[slot].text, text, sizeof(text_cache[slot].text) - 1);
@@ -409,7 +484,7 @@ SDL_Surface* GFX_getCachedText(TTF_Font* font, const char* text, SDL_Color color
 }
 
 // The path GFX_loadSystemFont last opened, for runtime font caches (common/ui/ui_font.c) that open the same
-// face at other sizes; and their close hook, run before every system-font (re)load (font or scale change)
+// face at other sizes; and their close hook, run before every system-font (re)load (font change)
 // and in GFX_quit so they reopen at the new font/scale.
 static char system_font_path[MAX_PATH];
 static void (*font_reload_hook)(void) = NULL;
@@ -453,10 +528,6 @@ int GFX_loadSystemFont(const char* fontPath) {
 	font.small = TTF_OpenFont(fontPath, SCALE1(FONT_SMALL));
 	font.tiny = TTF_OpenFont(fontPath, SCALE1(FONT_TINY));
 	font.micro = TTF_OpenFont(fontPath, SCALE1(FONT_MICRO));
-	// the hint bar's chrome-size face is only used when CHROME_SCALE differs from the UI scale (hintTinyChrome);
-	// a scale change reloads the system fonts, so this re-decides then
-	TTF_CloseFont(hint_tiny_chrome);
-	hint_tiny_chrome = CHROME_SCALE != FIXED_SCALE ? TTF_OpenFont(fontPath, CHROME1(FONT_TINY)) : NULL;
 
 	// Secondary Arabic font (fixed path — independent of the primary UI font).
 	// Missing file => NULL entries => Arabic falls back to primary (tofu), no crash.
@@ -475,8 +546,6 @@ int GFX_loadSystemFont(const char* fontPath) {
 	font_ar.small = TTF_OpenFont(arPath, SCALE1(FONT_SMALL));
 	font_ar.tiny = TTF_OpenFont(arPath, SCALE1(FONT_TINY));
 	font_ar.micro = TTF_OpenFont(arPath, SCALE1(FONT_MICRO));
-	TTF_CloseFont(hint_tiny_chrome_ar);
-	hint_tiny_chrome_ar = CHROME_SCALE != FIXED_SCALE ? TTF_OpenFont(arPath, CHROME1(FONT_TINY)) : NULL;
 
 	return 0;
 }
@@ -613,11 +682,42 @@ static bool GFX_timezoneIsApplied(const char* timezone) {
 }
 
 
-static void GFX_resetNavGlyphs(void);
+// RES_PATH/<stem>@<scale>x.png. A scale with no baked sheet (a uiscale_dev= value being tuned) is drawn from the
+// nearest larger baked one (UIScale_pickSheet), resized once here: nearest-neighbour, which is only ever seen while
+// tuning, since the shipped scales are all baked (scripts/gen-chrome-assets.py, gen-nav-icons.py). NULL when no sheet
+// of `stem` exists.
+static SDL_Surface* GFX_loadScaledSheet(const char* stem, float scale) {
+	char path[MAX_PATH];
+	snprintf(path, sizeof(path), "%s/%s@%gx.png", RES_PATH, stem, scale);
+	if (exists(path))
+		return IMG_Load(path);
+	static const float candidates[] = {3.0f, 2.5f, 2.25f, 2.0f, 1.6875f, 1.5f};
+	float baked[sizeof(candidates) / sizeof(candidates[0])];
+	int n = 0;
+	for (int i = 0; i < (int)(sizeof(candidates) / sizeof(candidates[0])); i++) {
+		snprintf(path, sizeof(path), "%s/%s@%gx.png", RES_PATH, stem, candidates[i]);
+		if (exists(path))
+			baked[n++] = candidates[i];
+	}
+	float from = UIScale_pickSheet(scale, baked, n);
+	if (from <= 0.0f)
+		return NULL;
+	snprintf(path, sizeof(path), "%s/%s@%gx.png", RES_PATH, stem, from);
+	SDL_Surface* src = IMG_Load(path);
+	if (!src)
+		return NULL;
+	int w = (int)lroundf(src->w * scale / from), h = (int)lroundf(src->h * scale / from);
+	SDL_Surface* out = SDL_CreateRGBSurfaceWithFormat(0, w > 0 ? w : 1, h > 0 ? h : 1, 32, SDL_PIXELFORMAT_ARGB8888);
+	if (out) {
+		SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);
+		SDL_BlitScaled(src, NULL, out, NULL);
+		LOG_info("[UI] no %s@%gx.png, scaled from @%gx\n", stem, scale, from);
+	}
+	SDL_FreeSurface(src);
+	return out;
+}
 
-// Asset-sheet source rects are in scaled pixels, so they are rebuilt whenever
-// the UI scale changes (GFX_init, GFX_reloadScale).
-// The asset sheet's rects at `scale` (FIXED_SCALE, or the hint bar's CHROME_SCALE for its baked sheet).
+// The asset sheet's source rects at `scale`, in that sheet's pixels (FIXED_SCALE, or the indicator's INDICATOR_SCALE).
 static void GFX_initAssetRectsInto(SDL_Rect* rects, float scale) {
 #define AR4(a, b, c, d) (int)((a) * scale + 0.5f), (int)((b) * scale + 0.5f), (int)((c) * scale + 0.5f), (int)((d) * scale + 0.5f)
 	rects[ASSET_WHITE_PILL] = (SDL_Rect){AR4(1, 1, 30, 30)};
@@ -647,6 +747,7 @@ static void GFX_initAssetRectsInto(SDL_Rect* rects, float scale) {
 	rects[ASSET_BATTERY_FILL] = (SDL_Rect){AR4(81, 33, 12, 6)};
 	rects[ASSET_BATTERY_FILL_LOW] = (SDL_Rect){AR4(1, 55, 12, 6)};
 	rects[ASSET_BATTERY_BOLT] = (SDL_Rect){AR4(81, 41, 12, 6)};
+	rects[ASSET_BATTERY_CHARGING] = (SDL_Rect){AR4(44, 66, 24, 10)};
 	rects[ASSET_SCROLL_UP] = (SDL_Rect){AR4(97, 23, 24, 6)};
 	rects[ASSET_SCROLL_DOWN] = (SDL_Rect){AR4(97, 31, 24, 6)};
 	rects[ASSET_WIFI] = (SDL_Rect){AR4(1, 104, 12, 12)};
@@ -687,13 +788,13 @@ SDL_Surface* GFX_init(int mode) {
 	// TODO: all this doesn't really belong here...
 	// tried adding to PWR_init() but that was no good (not sure why)
 
-	// Resolve the UI scale before CFG_init loads fonts: font= precedes
-	// uiscale= in the file and the font callback sizes every font by
-	// FIXED_SCALE. Done here, not in CFG_init, because config.c is also
-	// linked into tools without platform.c (nextval, poweroff_next).
+	// The device's UI scale (ui_scale.h), resolved before CFG_init loads fonts: the font callback sizes every font
+	// by FIXED_SCALE. Here, not in CFG_init, because config.c is also linked into tools without platform.c
+	// (nextval, poweroff_next).
 	char scale_path[MAX_PATH];
 	snprintf(scale_path, sizeof(scale_path), "%s/minuisettings.txt", SHARED_USERDATA_PATH);
-	ui_scale = UIScale_resolve(UIScale_readFile(scale_path), NATIVE_SCALE);
+	ui_scale = UIScale_resolveDevice(UI_DEVICE_NAME, scale_path);
+	LOG_info("[UI] scale %g (%s)\n", ui_scale, UI_DEVICE_NAME);
 	CFG_init(GFX_loadSystemFont, GFX_updateColors);
 
 	// Reapply only when the volatile symlink is missing or stale. Persisting an
@@ -738,41 +839,13 @@ SDL_Surface* GFX_init(int mode) {
 
 	GFX_initAssetRects();
 
-	char asset_path[MAX_PATH];
-	sprintf(asset_path, "%s/assets@%ix.png", RES_PATH, FIXED_SCALE);
-	if (!exists(asset_path))
-		LOG_info("missing assets, you're about to segfault dummy!\n");
-	gfx.assets = IMG_Load(asset_path);
+	gfx.assets = GFX_loadScaledSheet("assets", FIXED_SCALE);
+	if (!gfx.assets)
+		LOG_info("missing assets@%gx.png, you're about to segfault dummy!\n", FIXED_SCALE);
 
 	PLAT_clearAll();
 
 	return gfx.screen;
-}
-
-int GFX_reloadScale(void) {
-	int next = UIScale_resolve(CFG_getUIScale(), NATIVE_SCALE);
-	if (next == FIXED_SCALE)
-		return 0;
-
-	int prev = ui_scale;
-	ui_scale = next;
-	char asset_path[MAX_PATH];
-	sprintf(asset_path, "%s/assets@%ix.png", RES_PATH, FIXED_SCALE);
-	SDL_Surface* assets = IMG_Load(asset_path);
-	if (!assets) {
-		LOG_info("GFX_reloadScale: %s failed to load, keeping %ix\n", asset_path, prev ? prev : NATIVE_SCALE);
-		ui_scale = prev;
-		return -1;
-	}
-	SDL_FreeSurface(gfx.assets);
-	gfx.assets = assets;
-	GFX_initAssetRects();
-	GFX_resetNavGlyphs();
-
-	char font_path[MAX_PATH];
-	snprintf(font_path, sizeof(font_path), "%s/font1.ttf", RES_PATH);
-	GFX_loadSystemFont(font_path); // also clears the text cache
-	return 0;
 }
 
 SDL_Surface* GFX_getScreen(void) {
@@ -782,8 +855,8 @@ void GFX_setScreen(SDL_Surface* s) {
 	if (s)
 		gfx.screen = s;
 }
-static void hwChromeFree(void);	   // the chrome-scale status-group context (below)
-static void hwIndicatorFree(void); // and the indicator's
+static void hwIndicatorFree(void); // the indicator's baked sheet (below)
+static void pillCachesFree(void);  // the pill strips and atlases (below)
 void GFX_quit(void) {
 	GFX_finishStartupBoost();
 
@@ -792,7 +865,7 @@ void GFX_quit(void) {
 
 	// cached text keys on the font pointers closed below
 	GFX_clearTextCache();
-	hwChromeFree();
+	pillCachesFree();
 	hwIndicatorFree();
 
 	TTF_CloseFont(font.xlarge);
@@ -811,10 +884,6 @@ void GFX_quit(void) {
 	TTF_CloseFont(font_ar.tiny);
 	TTF_CloseFont(font_ar.micro);
 	memset(&font_ar, 0, sizeof(font_ar));
-	TTF_CloseFont(hint_tiny_chrome);
-	hint_tiny_chrome = NULL;
-	TTF_CloseFont(hint_tiny_chrome_ar);
-	hint_tiny_chrome_ar = NULL;
 
 	SDL_FreeSurface(gfx.assets);
 	gfx.assets = NULL;
@@ -947,7 +1016,13 @@ void GFX_setAmbientColor(const void* data, unsigned width, unsigned height, size
 	}
 }
 
+static unsigned flip_count = 0;
+unsigned GFX_flipCount(void) {
+	return flip_count;
+}
+
 void GFX_flip(SDL_Surface* screen) {
+	flip_count++;
 	{
 		uint64_t performance_frequency = SDL_GetPerformanceFrequency();
 		uint64_t frame_duration = SDL_GetPerformanceCounter() - per_frame_start;
@@ -1004,15 +1079,15 @@ void GFX_flip(SDL_Surface* screen) {
 	per_frame_start = SDL_GetPerformanceCounter();
 }
 void GFX_GL_Swap() {
-	{
-		uint64_t performance_frequency = SDL_GetPerformanceFrequency();
-		uint64_t frame_duration = SDL_GetPerformanceCounter() - per_frame_start;
-		double elapsed_time_s = (double)frame_duration / performance_frequency;
-		double frame_ms = elapsed_time_s * 1000.0;
-		//LOG_info("GFX_GL_Swap: Frame time before flip: %.2f ms\n", frame_ms);
-	}
 	PLAT_GL_Swap();
+	GFX_GL_noteFrame();
+}
 
+// Frame-rate bookkeeping of one presented frame (perf stats, and current_fps,
+// which the screen-sync audio resampler follows). Split from GFX_GL_Swap for
+// minarch's present thread: there the main thread counts its frames here
+// while the thread does the swap.
+void GFX_GL_noteFrame(void) {
 	perf.fps = current_fps;
 	fps_counter++;
 
@@ -1579,6 +1654,172 @@ static int pill_rect_asset(int asset) {
 	}
 }
 
+// A pill's middle, the asset's middle slice (a column profile, the same across x) stretched to a strip PILL_STRIP_W
+// wide at the pill's height and tinted: built once per asset, height and colour, then tiled across the middle with
+// plain blits. The direct way, a tinted SDL_BlitScaled, takes SDL's slow per-pixel path (scaled + modulated + blended):
+// ~2 ms a frame for a list's selection pill on the Brick.
+#define PILL_STRIP_W 64
+#define PILL_STRIPS 4
+static struct {
+	SDL_Surface* src; // the assets surface it was cut from (a reload makes a new one)
+	int slice, h;
+	uint32_t color;
+	SDL_Surface* strip;
+	uint32_t lru;
+} pill_strips[PILL_STRIPS];
+static uint32_t pill_strip_lru = 0;
+
+static SDL_Surface* pillStrip(int slice, int h, uint32_t color) {
+	SDL_Surface* src = gfx.assets;
+	int victim = 0;
+	for (int i = 0; i < PILL_STRIPS; i++) {
+		if (pill_strips[i].strip && pill_strips[i].src == src && pill_strips[i].slice == slice &&
+			pill_strips[i].h == h && pill_strips[i].color == color) {
+			pill_strips[i].lru = ++pill_strip_lru;
+			return pill_strips[i].strip;
+		}
+		if (pill_strips[i].lru < pill_strips[victim].lru)
+			victim = i;
+	}
+	SDL_Surface* strip = SDL_CreateRGBSurfaceWithFormat(0, PILL_STRIP_W, h, 32, SDL_PIXELFORMAT_ARGB8888);
+	if (!strip)
+		return NULL;
+	SDL_FillRect(strip, NULL, 0);
+	// the slice copied in (no blend), tinted as the direct blit would tint it
+	TintRestore keep = tint_begin(src, color == RGB_WHITE ? 0xFFFFFFFF : asset_color_to_rgba(color));
+	SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);
+	SDL_BlitScaled(src, &asset_rects[slice], strip, NULL);
+	tint_end(src, keep);
+	SDL_SetSurfaceBlendMode(strip, SDL_BLENDMODE_BLEND);
+	if (pill_strips[victim].strip)
+		SDL_FreeSurface(pill_strips[victim].strip);
+	pill_strips[victim].src = src;
+	pill_strips[victim].slice = slice;
+	pill_strips[victim].h = h;
+	pill_strips[victim].color = color;
+	pill_strips[victim].strip = strip;
+	pill_strips[victim].lru = ++pill_strip_lru;
+	return strip;
+}
+
+// A pill as GPU sprites (a List drawn on the GPU): its left cap, middle strip and right cap tinted once into one small
+// atlas per asset, height and colour, then three sprites, the strip stretched across the middle by the GPU (its
+// columns are all alike, so that is exact). Same pixels as GFX_blitPillColor's blits.
+#define PILL_ATLASES 6 // drawn-cap heights (ui_pill_cap.h) share them with the GPU path
+static struct {
+	SDL_Surface* src;
+	int asset, h, r;
+	uint32_t color;
+	SDL_Surface* atlas; // [left cap r | strip PILL_STRIP_W | right cap r] x h
+	uint32_t lru;
+} pill_atlases[PILL_ATLASES];
+static uint32_t pill_atlas_lru = 0;
+
+// A pill's two end caps drawn at height h (ui_pill_cap.h) into an ARGB8888 surface: the left one at x 0, the right one
+// at right_x, both r wide, in the tint `rgba` with the coverage as alpha. For a pill shorter (or taller) than the asset
+// sheet's, whose caps can't be cut from it.
+static void pillCapsDraw(SDL_Surface* dst, int r, int h, uint32_t rgba, int right_x) {
+	if (SDL_MUSTLOCK(dst))
+		SDL_LockSurface(dst);
+	for (int y = 0; y < h; y++) {
+		uint32_t* row = (uint32_t*)((uint8_t*)dst->pixels + y * dst->pitch);
+		for (int x = 0; x < r; x++) {
+			uint32_t al = PillCap_coverage(r, h, x, y, true) * RGBA_a(rgba) / 255;
+			uint32_t ar = PillCap_coverage(r, h, x, y, false) * RGBA_a(rgba) / 255;
+			uint32_t rgb = (uint32_t)RGBA_r(rgba) << 16 | (uint32_t)RGBA_g(rgba) << 8 | RGBA_b(rgba);
+			row[x] = al << 24 | rgb;
+			row[right_x + x] = ar << 24 | rgb;
+		}
+	}
+	if (SDL_MUSTLOCK(dst))
+		SDL_UnlockSurface(dst);
+}
+
+static SDL_Surface* pillAtlas(int asset, int h, uint32_t color, int* r_out) {
+	int slice = pill_rect_asset(asset);
+	int r = h / 2;
+	if (slice < 0 || r <= 0)
+		return NULL;
+	SDL_Surface* src = gfx.assets;
+	int victim = 0;
+	for (int i = 0; i < PILL_ATLASES; i++) {
+		if (pill_atlases[i].atlas && pill_atlases[i].src == src && pill_atlases[i].asset == asset &&
+			pill_atlases[i].h == h && pill_atlases[i].color == color) {
+			pill_atlases[i].lru = ++pill_atlas_lru;
+			*r_out = pill_atlases[i].r;
+			return pill_atlases[i].atlas;
+		}
+		if (pill_atlases[i].lru < pill_atlases[victim].lru)
+			victim = i;
+	}
+	SDL_Surface* strip = pillStrip(slice, h, color);
+	SDL_Surface* atlas = strip ? SDL_CreateRGBSurfaceWithFormat(0, 2 * r + PILL_STRIP_W, h, 32, SDL_PIXELFORMAT_ARGB8888)
+							   : NULL;
+	if (!atlas)
+		return NULL;
+	SDL_FillRect(atlas, NULL, 0);
+	// the caps copied in (no blend) as GFX_blitAssetColor tints them
+	SDL_Rect* ar = &asset_rects[asset];
+	uint32_t rgba = color == RGB_WHITE ? 0xFFFFFFFF : asset_color_to_rgba(color);
+	if (h != ar->h) { // a pill the sheet's caps don't fit: drawn
+		pillCapsDraw(atlas, r, h, rgba, r + PILL_STRIP_W);
+	} else {
+		TintRestore keep = tint_begin(src, rgba);
+		SDL_SetSurfaceBlendMode(src, SDL_BLENDMODE_NONE);
+		SDL_BlitSurface(src, &(SDL_Rect){ar->x, ar->y, r, h}, atlas, &(SDL_Rect){0, 0});
+		SDL_BlitSurface(src, &(SDL_Rect){ar->x + r, ar->y, r, h}, atlas, &(SDL_Rect){r + PILL_STRIP_W, 0});
+		tint_end(src, keep);
+	}
+	SDL_SetSurfaceBlendMode(strip, SDL_BLENDMODE_NONE);
+	SDL_BlitSurface(strip, NULL, atlas, &(SDL_Rect){r, 0});
+	SDL_SetSurfaceBlendMode(strip, SDL_BLENDMODE_BLEND);
+	SDL_SetSurfaceBlendMode(atlas, SDL_BLENDMODE_BLEND);
+	if (pill_atlases[victim].atlas) {
+		PLAT_freeSurfaceTexture(pill_atlases[victim].atlas);
+		SDL_FreeSurface(pill_atlases[victim].atlas);
+	}
+	pill_atlases[victim].src = src;
+	pill_atlases[victim].asset = asset;
+	pill_atlases[victim].h = h;
+	pill_atlases[victim].r = r;
+	pill_atlases[victim].color = color;
+	pill_atlases[victim].atlas = atlas;
+	pill_atlases[victim].lru = ++pill_atlas_lru;
+	*r_out = r;
+	return atlas;
+}
+
+bool GFX_pillSprites(int asset, const SDL_Rect* rect, uint32_t asset_color, const SDL_Rect* clip) {
+	int h = rect->h ? rect->h : asset_rects[asset].h;
+	int r = 0;
+	SDL_Surface* atlas = pillAtlas(asset, h, asset_color, &r);
+	SDL_Texture* tex = atlas ? PLAT_textureForSurface(atlas) : NULL;
+	if (!tex)
+		return false;
+	int w = rect->w < h ? h : rect->w; // as GFX_blitPillColor: never narrower than its two caps
+	int x = rect->x, y = rect->y, mid = w - h;
+	PLAT_spriteAdd(tex, &(SDL_Rect){0, 0, r, h}, &(SDL_Rect){x, y, r, h}, 255, clip);
+	if (mid > 0)
+		PLAT_spriteAdd(tex, &(SDL_Rect){r, 0, PILL_STRIP_W, h}, &(SDL_Rect){x + r, y, mid, h}, 255, clip);
+	PLAT_spriteAdd(tex, &(SDL_Rect){r + PILL_STRIP_W, 0, r, h}, &(SDL_Rect){x + r + (mid > 0 ? mid : 0), y, r, h}, 255,
+				   clip);
+	return true;
+}
+
+static void pillCachesFree(void) {
+	for (int i = 0; i < PILL_ATLASES; i++) {
+		if (pill_atlases[i].atlas) {
+			PLAT_freeSurfaceTexture(pill_atlases[i].atlas);
+			SDL_FreeSurface(pill_atlases[i].atlas);
+		}
+	}
+	memset(pill_atlases, 0, sizeof(pill_atlases));
+	for (int i = 0; i < PILL_STRIPS; i++)
+		if (pill_strips[i].strip)
+			SDL_FreeSurface(pill_strips[i].strip);
+	memset(pill_strips, 0, sizeof(pill_strips));
+}
+
 void GFX_blitPillColor(int asset, SDL_Surface* dst, SDL_Rect* dst_rect, uint32_t asset_color, uint32_t fill_color) {
 	(void)fill_color; // kept for API compatibility; middles use asset_color
 	int x = dst_rect->x;
@@ -1589,6 +1830,21 @@ void GFX_blitPillColor(int asset, SDL_Surface* dst, SDL_Rect* dst_rect, uint32_t
 	if (h == 0)
 		h = asset_rects[asset].h;
 
+	if (h != asset_rects[asset].h) { // shorter (or taller) than the sheet's pill: from the drawn-cap atlas
+		int ar = 0;
+		SDL_Surface* atlas = pillAtlas(asset, h, asset_color, &ar);
+		if (atlas) {
+			int aw = w < 2 * ar ? 2 * ar : w, mid = aw - 2 * ar;
+			SDL_BlitSurface(atlas, &(SDL_Rect){0, 0, ar, h}, dst, &(SDL_Rect){x, y});
+			for (int sx = 0; sx < mid; sx += PILL_STRIP_W) {
+				int sw = mid - sx < PILL_STRIP_W ? mid - sx : PILL_STRIP_W;
+				SDL_BlitSurface(atlas, &(SDL_Rect){ar, 0, sw, h}, dst, &(SDL_Rect){x + ar + sx, y});
+			}
+			SDL_BlitSurface(atlas, &(SDL_Rect){ar + PILL_STRIP_W, 0, ar, h}, dst, &(SDL_Rect){x + ar + mid, y});
+			return;
+		}
+	}
+
 	int r = h / 2;
 	if (w < h)
 		w = h;
@@ -1598,7 +1854,13 @@ void GFX_blitPillColor(int asset, SDL_Surface* dst, SDL_Rect* dst_rect, uint32_t
 	x += r;
 	if (w > 0) {
 		int slice = pill_rect_asset(asset);
-		if (slice >= 0)
+		SDL_Surface* strip = slice >= 0 ? pillStrip(slice, h, asset_color) : NULL;
+		if (strip) {
+			for (int sx = 0; sx < w; sx += PILL_STRIP_W) {
+				int sw = w - sx < PILL_STRIP_W ? w - sx : PILL_STRIP_W;
+				SDL_BlitSurface(strip, &(SDL_Rect){0, 0, sw, h}, dst, &(SDL_Rect){x + sx, y});
+			}
+		} else if (slice >= 0)
 			GFX_blitSurfaceColorScaled(gfx.assets, &asset_rects[slice], dst, &(SDL_Rect){x, y, w, h}, asset_color);
 		else
 			GFX_fillRectColor(dst, &(SDL_Rect){x, y, w, h}, asset_color);
@@ -1626,8 +1888,10 @@ void GFX_blitRectColor(int asset, SDL_Surface* dst, SDL_Rect* dst_rect, uint32_t
 	int h = dst_rect->h;
 
 	SDL_Rect* rect = &asset_rects[asset];
-	int d = rect->w;
-	int r = d / 2;
+	// the corners are r square; the fills span what they leave (2r, not the art's width: at a fractional scale the
+	// art can be odd-sized, e.g. 49 px at 2.4375, and w - d left a 1 px gap through the middle)
+	int r = rect->w / 2;
+	int d = 2 * r;
 
 	GFX_blitAssetColor(asset, &(SDL_Rect){0, 0, r, r}, dst, &(SDL_Rect){x, y}, asset_color);
 	GFX_fillRectColor(dst, &(SDL_Rect){x + r, y, w - d, r}, asset_color);
@@ -1655,7 +1919,7 @@ void GFX_assetRect(int asset, SDL_Rect* dst_rect) {
 //   NAV_IMAGE - a full-colour glyph (the d-pad, white cross with the active axis
 //               in red); blitted as authored, never tinted.
 // Any button without art (or a missing asset on device) returns NULL and falls
-// back to the drawn circle/pill in GFX_blitButtonChrome.
+// back to the drawn circle/pill in GFX_blitButton.
 typedef enum { NAV_DISC,
 			   NAV_LABEL,
 			   NAV_IMAGE } NavGlyphStyle;
@@ -1665,68 +1929,45 @@ static struct NavGlyph {
 	NavGlyphStyle style;
 	SDL_Surface* surf;
 	uint8_t tried;
-	SDL_Surface* nsurf; // at CHROME_SCALE (the hint bar's), when it differs from FIXED_SCALE
-	uint8_t ntried;
 } nav_glyphs[] = {
-	{"A", "nav_button_a", NAV_DISC, NULL, 0, NULL, 0},
-	{"B", "nav_button_b", NAV_DISC, NULL, 0, NULL, 0},
-	{"X", "nav_button_x", NAV_DISC, NULL, 0, NULL, 0},
-	{"Y", "nav_button_y", NAV_DISC, NULL, 0, NULL, 0},
-	{"L1", "nav_trigger_l1", NAV_DISC, NULL, 0, NULL, 0},
-	{"L2", "nav_trigger_l2", NAV_DISC, NULL, 0, NULL, 0},
-	{"R1", "nav_trigger_r1", NAV_DISC, NULL, 0, NULL, 0},
-	{"R2", "nav_trigger_r2", NAV_DISC, NULL, 0, NULL, 0},
-	{"L3", "nav_button_l3", NAV_DISC, NULL, 0, NULL, 0},
-	{"R3", "nav_button_r3", NAV_DISC, NULL, 0, NULL, 0},
-	{"MENU", "nav_button_menu", NAV_DISC, NULL, 0, NULL, 0},
-	{"HOME", "nav_button_home", NAV_DISC, NULL, 0, NULL, 0},
-	{"START", "nav_button_start", NAV_LABEL, NULL, 0, NULL, 0},
-	{"SELECT", "nav_button_select", NAV_LABEL, NULL, 0, NULL, 0},
-	{"LEFT/RIGHT", "nav_dpad_horizontal", NAV_IMAGE, NULL, 0, NULL, 0},
+	{"A", "nav_button_a", NAV_DISC, NULL, 0},
+	{"B", "nav_button_b", NAV_DISC, NULL, 0},
+	{"X", "nav_button_x", NAV_DISC, NULL, 0},
+	{"Y", "nav_button_y", NAV_DISC, NULL, 0},
+	{"L1", "nav_trigger_l1", NAV_DISC, NULL, 0},
+	{"L2", "nav_trigger_l2", NAV_DISC, NULL, 0},
+	{"R1", "nav_trigger_r1", NAV_DISC, NULL, 0},
+	{"R2", "nav_trigger_r2", NAV_DISC, NULL, 0},
+	{"L3", "nav_button_l3", NAV_DISC, NULL, 0},
+	{"R3", "nav_button_r3", NAV_DISC, NULL, 0},
+	{"MENU", "nav_button_menu", NAV_DISC, NULL, 0},
+	{"HOME", "nav_button_home", NAV_DISC, NULL, 0},
+	{"START", "nav_button_start", NAV_LABEL, NULL, 0},
+	{"SELECT", "nav_button_select", NAV_LABEL, NULL, 0},
+	{"LEFT/RIGHT", "nav_dpad_horizontal", NAV_IMAGE, NULL, 0},
 };
-// Glyph PNGs are per-scale (@2x/@3x); drop them so the next lookup loads the
-// current scale.
-static void GFX_resetNavGlyphs(void) {
-	for (int i = 0; i < (int)(sizeof(nav_glyphs) / sizeof(nav_glyphs[0])); i++) {
-		if (nav_glyphs[i].surf)
-			SDL_FreeSurface(nav_glyphs[i].surf);
-		nav_glyphs[i].surf = NULL;
-		nav_glyphs[i].tried = 0;
-		if (nav_glyphs[i].nsurf)
-			SDL_FreeSurface(nav_glyphs[i].nsurf);
-		nav_glyphs[i].nsurf = NULL;
-		nav_glyphs[i].ntried = 0;
-	}
-}
-// The glyph surface for `button` at `scale` (FIXED_SCALE's cache, or the CHROME_SCALE one when they differ), or NULL
-// when the button has no art (the drawn fallback). Baked per CHROME_SCALE (scripts/gen-nav-icons.py): @3x, @2.4375x and @2.25x.
-static SDL_Surface* GFX_getNavGlyphAt(const char* button, float scale) {
+// The glyph surface for `button` at FIXED_SCALE, or NULL when the button has no art (the drawn fallback). Baked per
+// device scale (scripts/gen-nav-icons.py): @3x, @2.5x and @2.25x.
+static SDL_Surface* GFX_getNavGlyph(const char* button) {
 	if (!button || !button[0])
 		return NULL;
-	bool native = scale != FIXED_SCALE;
 	for (int i = 0; i < (int)(sizeof(nav_glyphs) / sizeof(nav_glyphs[0])); i++) {
 		struct NavGlyph* g = &nav_glyphs[i];
 		if (strcmp(button, g->key) != 0)
 			continue;
-		SDL_Surface** surf = native ? &g->nsurf : &g->surf;
-		uint8_t* tried = native ? &g->ntried : &g->tried;
-		if (*surf)
-			return *surf;
-		if (*tried)
+		if (g->surf)
+			return g->surf;
+		if (g->tried)
 			return NULL; // asset absent on device — use the drawn fallback
-		*tried = 1;
-		char path[MAX_PATH];
-		sprintf(path, "%s/%s@%gx.png", RES_PATH, g->file, scale);
-		SDL_Surface* s = IMG_Load(path);
-		if (s) {
-			SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_BLEND);
-			*surf = s;
-		}
-		return *surf;
+		g->tried = 1;
+		g->surf = GFX_loadScaledSheet(g->file, FIXED_SCALE);
+		if (g->surf)
+			SDL_SetSurfaceBlendMode(g->surf, SDL_BLENDMODE_BLEND);
+		return g->surf;
 	}
 	return NULL;
 }
-// A button hint drawn at `scale` (FIXED_SCALE, or the fractional CHROME_SCALE): its glyphs, sizes and label font
+// A button hint drawn at `scale` (FIXED_SCALE): its glyphs, sizes and label font
 // (`tiny`, FONT_TINY at that scale).
 static int GFX_getButtonWidthAt(char* hint, char* button, float scale, TTF_Font* tiny) {
 	int button_width = 0;
@@ -1735,7 +1976,7 @@ static int GFX_getButtonWidthAt(char* hint, char* button, float scale, TTF_Font*
 
 	button = (char*)PAD_buttonLabel(button);
 
-	SDL_Surface* glyph = GFX_getNavGlyphAt(button, scale);
+	SDL_Surface* glyph = GFX_getNavGlyph(button);
 	if (glyph) {
 		button_width += glyph->w; // both styles advance by the glyph width
 	} else if (strlen(button) == 1) {
@@ -1751,13 +1992,8 @@ static int GFX_getButtonWidthAt(char* hint, char* button, float scale, TTF_Font*
 	button_width += width;
 	return button_width;
 }
-// The hint bar's own size: CHROME_SCALE whatever the UI scale (the UI scale's font when they match).
-static TTF_Font* hintTinyChrome(void) {
-	return (CHROME_SCALE == FIXED_SCALE || !hint_tiny_chrome) ? font.tiny : hint_tiny_chrome;
-}
-int GFX_getButtonWidthChrome(char* hint, char* button) {
-	TTF_Font* tiny = hintTinyChrome();
-	return GFX_getButtonWidthAt(hint, button, tiny == font.tiny ? FIXED_SCALE : CHROME_SCALE, tiny);
+int GFX_getButtonWidth(char* hint, char* button) {
+	return GFX_getButtonWidthAt(hint, button, FIXED_SCALE, font.tiny);
 }
 static uint32_t gfx_px_get(SDL_Surface* s, int x, int y) {
 	uint8_t* p = (uint8_t*)s->pixels + y * s->pitch + x * s->format->BytesPerPixel;
@@ -1850,7 +2086,7 @@ static void GFX_blitButtonAt(char* hint, char* button, SDL_Surface* dst, SDL_Rec
 	Uint32 btn_color = SDL_MapRGB(dst->format, TRIAD_WHITE);
 
 	// button
-	SDL_Surface* glyph = GFX_getNavGlyphAt(button, scale);
+	SDL_Surface* glyph = GFX_getNavGlyph(button);
 	if (glyph) {
 		// Show every glyph in its native colours (white masks; the d-pad's
 		// white + red) with no tint, so the button hint matches the white
@@ -1888,9 +2124,8 @@ static void GFX_blitButtonAt(char* hint, char* button, SDL_Surface* dst, SDL_Rec
 	if (text)
 		SDL_BlitSurface(text, NULL, dst, &(SDL_Rect){ox + dst_rect->x, dst_rect->y + (btn_sz - text->h) / 2, text->w, text->h});
 }
-void GFX_blitButtonChrome(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect) {
-	TTF_Font* tiny = hintTinyChrome();
-	GFX_blitButtonAt(hint, button, dst, dst_rect, tiny == font.tiny ? FIXED_SCALE : CHROME_SCALE, tiny);
+void GFX_blitButton(char* hint, char* button, SDL_Surface* dst, SDL_Rect* dst_rect) {
+	GFX_blitButtonAt(hint, button, dst, dst_rect, FIXED_SCALE, font.tiny);
 }
 void GFX_blitMessage(TTF_Font* font, char* msg, SDL_Surface* dst, SDL_Rect* dst_rect) {
 	if (!dst_rect)
@@ -1944,15 +2179,42 @@ void GFX_blitMessage(TTF_Font* font, char* msg, SDL_Surface* dst, SDL_Rect* dst_
 	}
 }
 
-// The status group's drawing scale while GFX_blitHardwareGroup draws it at CHROME_SCALE (0: FIXED_SCALE, as for every
-// other caller of the helpers below).
+// The drawing scale while GFX_blitHardwareIndicatorFixed draws the indicator at INDICATOR_SCALE (0: FIXED_SCALE, as for
+// every other caller of the helpers below).
 static float hw_scale = 0;
 #define HW1(a) (hw_scale > 0 ? (int)((a) * hw_scale + 0.5f) : SCALE1(a))
 
+// While charging with the percentage shown, the battery is the wider ASSET_BATTERY_CHARGING: the bolt alone would
+// leave no room for the number.
+static int batteryShowsChargingPercent(int is_charging) {
+	return is_charging && CFG_getShowBatteryPercent();
+}
+
+// The battery glyph's rect as GFX_blitBatteryAtPosition draws it now, for laying out the status group around it.
+static SDL_Rect batteryRect(void) {
+	return asset_rects[batteryShowsChargingPercent(SDL_AtomicGet(&pwr.is_charging)) ? ASSET_BATTERY_CHARGING
+																					: ASSET_BATTERY];
+}
+
 void GFX_blitBatteryAtPosition(SDL_Surface* dst, int x, int y) {
 	SDL_Rect battery_rect = asset_rects[ASSET_BATTERY];
+	int is_charging = SDL_AtomicGet(&pwr.is_charging);
 
-	if (SDL_AtomicGet(&pwr.is_charging)) {
+	if (batteryShowsChargingPercent(is_charging)) {
+		SDL_Rect charging_rect = asset_rects[ASSET_BATTERY_CHARGING];
+		GFX_blitAssetColor(ASSET_BATTERY_CHARGING, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
+
+		char percentage[16];
+		sprintf(percentage, "%i", SDL_AtomicGet(&pwr.charge));
+		SDL_Surface* text = GFX_renderText(font.micro, percentage, uintToColour(THEME_COLOR6_255));
+		// centred in the space right of the bolt (the glyph's units 7 to 23)
+		int left = HW1(7);
+		SDL_Rect target = {
+			x + left + (charging_rect.w - left - HW1(1) - text->w) / 2,
+			y + (charging_rect.h - text->h) / 2 - 1};
+		SDL_BlitSurface(text, NULL, dst, &target);
+		SDL_FreeSurface(text);
+	} else if (is_charging) {
 		GFX_blitAssetColor(ASSET_BATTERY, NULL, dst, &(SDL_Rect){x, y}, THEME_COLOR6);
 		GFX_blitAssetColor(ASSET_BATTERY_BOLT, NULL, dst, &(SDL_Rect){x + HW1(3), y + HW1(2)}, THEME_COLOR6);
 	} else {
@@ -2058,7 +2320,7 @@ static int hardwareGroupDraw(SDL_Surface* dst, IndicatorType show_setting, int y
 	int ow = 0;
 
 	int bar_h = HW1(BUTTON_SIZE) + HW1(BUTTON_MARGIN * 2);
-	// the right inset: the screen's edge padding (the same in pixels whatever the scale), as the hint bar's left one
+	// the right inset: the screen's edge padding, as the hint bar's left one
 	int pad = SCALE1(PADDING);
 
 	if (show_setting && !GetHDMI()) {
@@ -2079,7 +2341,7 @@ static int hardwareGroupDraw(SDL_Surface* dst, IndicatorType show_setting, int y
 		int show_cap = 0;
 		int show_rec = 0;
 		PWR_captureStatus(&show_cap, &show_rec);
-		SDL_Rect battery_rect = asset_rects[ASSET_BATTERY];
+		SDL_Rect battery_rect = batteryRect();
 
 		if (!show_ext_audio && !show_bt_controller && !show_wifi && !show_clock && !show_cap && !show_rec) {
 			ow = battery_rect.w + HW1(BUTTON_MARGIN * 2);
@@ -2208,80 +2470,14 @@ static int hardwareGroupDraw(SDL_Surface* dst, IndicatorType show_setting, int y
 	return ow;
 }
 
-// The status group (indicator, or recording, capture, audio, controller, Wi-Fi, battery and clock) keeps the hint bar's
-// CHROME_SCALE whatever the UI scale: drawn with that scale's baked asset sheet (assets@3x / @2.4375x / @2.25x), its rects and
-// fonts, swapped in for the call (the UI thread draws it), and centred in the UI-scaled top bar. Returns its width in px.
-static struct {
-	int built_for;			  // the FIXED_SCALE it was built beside (0: not built)
-	char font_path[MAX_PATH]; // and the system font it opened
-	SDL_Surface* assets;
-	SDL_Rect rects[ASSET_COUNT];
-	TTF_Font *small, *tiny, *micro;
-} hw_chrome;
-
-static void hwChromeFree(void) {
-	if (hw_chrome.assets)
-		SDL_FreeSurface(hw_chrome.assets);
-	// cached text keys on the font pointer: drop these fonts' entries before a later open can reuse the address
-	GFX_forgetFontText(hw_chrome.small);
-	GFX_forgetFontText(hw_chrome.tiny);
-	GFX_forgetFontText(hw_chrome.micro);
-	TTF_CloseFont(hw_chrome.small);
-	TTF_CloseFont(hw_chrome.tiny);
-	TTF_CloseFont(hw_chrome.micro);
-	memset(&hw_chrome, 0, sizeof(hw_chrome));
-}
-
-static bool hwChromeReady(void) {
-	if (CHROME_SCALE == FIXED_SCALE)
-		return false;
-	const char* font_path = GFX_getSystemFontPath();
-	if (hw_chrome.built_for == FIXED_SCALE && hw_chrome.assets && hw_chrome.small &&
-		strcmp(hw_chrome.font_path, font_path) == 0)
-		return true;
-	hwChromeFree();
-	GFX_initAssetRectsInto(hw_chrome.rects, CHROME_SCALE);
-	char path[MAX_PATH];
-	sprintf(path, "%s/assets@%gx.png", RES_PATH, CHROME_SCALE);
-	hw_chrome.assets = IMG_Load(path);
-	hw_chrome.small = TTF_OpenFont(font_path, CHROME1(FONT_SMALL));
-	hw_chrome.tiny = TTF_OpenFont(font_path, CHROME1(FONT_TINY));
-	hw_chrome.micro = TTF_OpenFont(font_path, CHROME1(FONT_MICRO));
-	hw_chrome.built_for = FIXED_SCALE;
-	snprintf(hw_chrome.font_path, sizeof(hw_chrome.font_path), "%s", font_path);
-	if (!hw_chrome.assets || !hw_chrome.small || !hw_chrome.tiny || !hw_chrome.micro) {
-		hwChromeFree();
-		return false;
-	}
-	return true;
-}
-
+// The status group (indicator, or recording, capture, audio, controller, Wi-Fi, battery and clock), centred in the top
+// bar. Returns its width in px.
 int GFX_blitHardwareGroup(SDL_Surface* dst, IndicatorType show_setting) {
-	if (!hwChromeReady())
-		return hardwareGroupDraw(dst, show_setting, 0);
-	int bar_h = BAR_HEIGHT;
-	int chrome_h = CHROME1(BUTTON_SIZE) + CHROME1(BUTTON_MARGIN * 2);
-	int y0 = (bar_h - chrome_h) / 2;
-	// swap the chrome context in
-	SDL_Rect live[ASSET_COUNT];
-	memcpy(live, asset_rects, sizeof(live));
-	SDL_Surface* live_assets = gfx.assets;
-	TTF_Font *live_small = font.small, *live_tiny = font.tiny, *live_micro = font.micro;
-	hw_scale = CHROME_SCALE;
-	memcpy(asset_rects, hw_chrome.rects, sizeof(live));
-	gfx.assets = hw_chrome.assets;
-	font.small = hw_chrome.small, font.tiny = hw_chrome.tiny, font.micro = hw_chrome.micro;
-	int ow = hardwareGroupDraw(dst, show_setting, y0);
-	// and back
-	font.small = live_small, font.tiny = live_tiny, font.micro = live_micro;
-	gfx.assets = live_assets;
-	memcpy(asset_rects, live, sizeof(live));
-	hw_scale = 0;
-	return ow;
+	return hardwareGroupDraw(dst, show_setting, 0);
 }
-// The volume / brightness / colour-temperature indicator draws at INDICATOR_SCALE (defines.h) whatever the UI scale,
-// with that scale's baked asset sheet (assets@2x / @1.625x / @1.5x) swapped in for the call: the same physical size on
-// every panel, and its PILL_SIZE pill fits inside every top bar (BAR_HEIGHT).
+// The volume / brightness / colour-temperature indicator draws at INDICATOR_SCALE (defines.h), two thirds of the UI
+// scale, with that scale's baked asset sheet (assets@2x / @1.625x / @1.5x) swapped in for the call, so its PILL_SIZE
+// pill fits inside the top bar (BAR_HEIGHT).
 #define IND1(a) ((int)((a) * INDICATOR_SCALE + 0.5f))
 static struct {
 	bool tried;
@@ -2299,11 +2495,9 @@ static bool hwIndicatorReady(void) {
 	if (!hw_ind.tried) {
 		hw_ind.tried = true;
 		GFX_initAssetRectsInto(hw_ind.rects, INDICATOR_SCALE);
-		char path[MAX_PATH];
-		sprintf(path, "%s/assets@%gx.png", RES_PATH, INDICATOR_SCALE);
-		hw_ind.assets = IMG_Load(path);
+		hw_ind.assets = GFX_loadScaledSheet("assets", INDICATOR_SCALE);
 		if (!hw_ind.assets)
-			LOG_info("missing %s: the indicator falls back to the UI scale\n", path);
+			LOG_info("missing assets@%gx.png: the indicator falls back to the UI scale\n", INDICATOR_SCALE);
 	}
 	return hw_ind.assets != NULL;
 }
@@ -2317,7 +2511,7 @@ void GFX_hardwareIndicatorSize(int* w, int* h) {
 int GFX_blitHardwareIndicatorFixed(SDL_Surface* dst, int x, int y, IndicatorType indicator_type) {
 	if (!hwIndicatorReady())
 		return GFX_blitHardwareIndicator(dst, x, y, indicator_type);
-	// swap the indicator context in (over whatever is live: the UI scale's, or the status group's chrome one)
+	// swap the indicator context in (over the UI scale's)
 	SDL_Rect live[ASSET_COUNT];
 	memcpy(live, asset_rects, sizeof(live));
 	SDL_Surface* live_assets = gfx.assets;
@@ -2335,14 +2529,12 @@ int GFX_blitHardwareIndicatorFixed(SDL_Surface* dst, int x, int y, IndicatorType
 char** GFX_getHardwareHintPairs(IndicatorType show_setting) {
 	static char* brightness_pairs[] = {BRIGHTNESS_BUTTON_LABEL, "BRIGHTNESS", NULL};
 	static char* colortemp_pairs[] = {BRIGHTNESS_BUTTON_LABEL, "COLOR TEMP", NULL};
-	static char* default_pairs[] = {"SELECT", "BRGHTNESS", NULL};
 
 	if (show_setting == INDICATOR_BRIGHTNESS)
 		return brightness_pairs;
 	if (show_setting == INDICATOR_COLORTEMP)
 		return colortemp_pairs;
-	if (show_setting)
-		return default_pairs;
+	// Volume alone shows no hint
 	return NULL;
 }
 
@@ -2449,14 +2641,14 @@ static void SND_resizeBuffer(void) { // plat_sound_resize_buffer
 #endif
 
 	int buffer_bytes = snd.frame_count * sizeof(SND_Frame);
+	pthread_mutex_lock(&audio_mutex);
 	snd.buffer = (SND_Frame*)realloc(snd.buffer, buffer_bytes);
-
-	LOG_info("Resized audio buffer to: %d bytes\n", buffer_bytes);
-
 	memset(snd.buffer, 0, buffer_bytes);
-
 	snd.frame_in = 0;
 	snd.frame_out = 0;
+	pthread_mutex_unlock(&audio_mutex);
+
+	LOG_info("Resized audio buffer to: %d bytes\n", buffer_bytes);
 
 #if defined(USE_SDL2)
 	SDL_UnlockAudioDevice(snd.device_id);
@@ -2707,7 +2899,7 @@ size_t SND_batchSamples(const SND_Frame* frames, size_t frame_count) {
 
 		int written_frames = 0;
 		pthread_mutex_lock(&audio_mutex);
-		for (int i = 0; i < resampled.frame_count; i++) {
+		for (int i = 0; snd.buffer && snd.frame_count > 0 && i < resampled.frame_count; i++) {
 			// Check if buffer full (leave one slot free)
 			if ((snd.frame_in + 1) % snd.frame_count == snd.frame_out) {
 				// Buffer full, break early
@@ -2732,6 +2924,16 @@ enum {
 	SND_FF_VERY_LATE
 };
 
+float SND_bufferOccupancy(void) {
+	if (snd.frame_count <= 0)
+		return 0.0f;
+	pthread_mutex_lock(&audio_mutex);
+	int used = snd.frame_in - snd.frame_out;
+	if (used < 0)
+		used += snd.frame_count;
+	pthread_mutex_unlock(&audio_mutex);
+	return (float)used / snd.frame_count;
+}
 size_t SND_batchSamples_fixed_rate(const SND_Frame* frames, size_t frame_count) {
 	static int current_mode = SND_FF_ON_TIME;
 	double ratio = 1.0;
@@ -2819,7 +3021,7 @@ size_t SND_batchSamples_fixed_rate(const SND_Frame* frames, size_t frame_count) 
 		int written_frames = 0;
 
 		pthread_mutex_lock(&audio_mutex);
-		for (int i = 0; i < resampled.frame_count; i++) {
+		for (int i = 0; snd.buffer && snd.frame_count > 0 && i < resampled.frame_count; i++) {
 			if ((snd.frame_in + 1) % snd.frame_count == snd.frame_out) {
 				// Buffer is full, break. This should never happen tho, but just to be safe
 				break;
@@ -2861,7 +3063,11 @@ void SND_init(double sample_rate, double frame_rate) { // plat_sound_init
 	}
 #endif
 
+	// a core may push audio from its own thread (DCX's flycast) while the
+	// main thread resets audio: swap the state under the lock it writes under
+	pthread_mutex_lock(&audio_mutex);
 	memset(&snd, 0, sizeof(struct SND_Context));
+	pthread_mutex_unlock(&audio_mutex);
 	snd.frame_rate = frame_rate;
 
 	SDL_AudioSpec spec_in;
@@ -2930,12 +3136,13 @@ void SND_quit(void) {
 	if (SDL_WasInit(SDL_INIT_AUDIO))
 		LOG_error("SND_quit: failed to quit audio!!\n");
 	LOG_debug("SND_quit: quit audio!!\n");
+	pthread_mutex_lock(&audio_mutex);
 	snd.initialized = 0;
-
 	if (snd.buffer) {
 		free(snd.buffer);
 		snd.buffer = NULL;
 	}
+	pthread_mutex_unlock(&audio_mutex);
 }
 
 // Weak reference: resolves to NULL if -lasound is not linked.
@@ -3048,6 +3255,10 @@ FALLBACK_IMPLEMENTATION void PLAT_setBigCoreOnline(bool online) {
 FALLBACK_IMPLEMENTATION void PLAT_setCPUSpeedRange(int min_khz, int max_khz) {
 	(void)min_khz;
 	(void)max_khz; // platform has no cpufreq range control
+}
+FALLBACK_IMPLEMENTATION void PLAT_setGPUShaderBoost(int on, const char* base_governor) {
+	(void)on;
+	(void)base_governor; // fixed GPU clock (tg5040): nothing to boost
 }
 // tg5040: cpu0's cpufreq policy is the only one. tg5050 overrides
 // this to also span the big cluster's policy4 when cpu4 is online.
@@ -3953,6 +4164,14 @@ void PWR_update(bool* _dirty, IndicatorType* _show_setting, PWR_callback_t befor
 		if (was_charging != is_charging) {
 			was_charging = is_charging;
 			dirty = true;
+		}
+		// the percentage, when shown, follows the charge (it climbs while charging)
+		static int was_charge = -1;
+		int charge = SDL_AtomicGet(&pwr.charge);
+		if (was_charge != charge) {
+			if (was_charge != -1 && CFG_getShowBatteryPercent())
+				dirty = true;
+			was_charge = charge;
 		}
 		checked_charge_at = now;
 	}

@@ -15,67 +15,6 @@ Neither file is a changelog — delete an entry when it lands, don't mark it don
 
 ---
 
-## Remove the /Emus + /Tools pak cleanup from the updater
-
-**Decided:** 2026-07-31 (owner). The merge itself is built — see
-`DEV_CHECKLIST.md`'s "Emus + Tools merged into .system (2026-07-31)" section and
-`docs/superpowers/specs/2026-07-31-emus-tools-system-merge-design.md`. This entry
-tracks only the deliberate sunset of the transition-period cleanup.
-
-`migrate-paks.sh` (`skeleton/SYSTEM/shared/bin/migrate-paks.sh`, invoked from
-`workspace/<plat>/install/update.sh`) deletes tag-matching paks from the `/Emus`
-and `/Tools` user layers on **every** update, as a transition measure to clear the
-redux-shipped paks that pre-merge cards left shadowing the new
-`.system/paks/{Emus,Tools}` copies (§3 of the spec). It is intentionally
-destructive to a same-tag copy in the user layer, so it must not run forever.
-
-The teardown has two independently-timed halves — do each only when its timer is
-up, and mind the order within each.
-
-**The `/Emus` + `/Tools` pak cleanup** (the always-runs destructive part). After ~2
-releases have shipped with it (long enough that essentially every active card has
-been cleaned once):
-
-- [ ] Drop the `migrate-paks.sh` invocation from `workspace/<plat>/install/update.sh`
-      and delete the script (`skeleton/SYSTEM/shared/bin/migrate-paks.sh`) and its
-      test (`scripts/tests/test-migrate-paks.sh`).
-- [ ] Update the `/Emus` + `/Tools` README.txt wording: the "same-named paks are
-      removed on update" warning becomes wrong once the cleanup is gone — with it
-      removed, a same-named pak in `/Emus`/`/Tools` is a usable override via the
-      existing SD-wins precedence (`utils.c:439-444`), which is the whole point of
-      keeping those folders as override layers.
-
-**The legacy-boot / pre-flatten apparatus** (the shims + the legacy `.system/<plat>`
-handling). These are what let an update land straight from v1.4.1's unflattened
-layout, so they can only go once updates from v1.4.1 no longer need to work — a
-much longer horizon than the pak cleanup, and they must be removed **together**:
-
-- [ ] Delete the "installing legacy-boot compat shims" block in the Makefile
-      (`~411-414`, the `install-shim.sh` → `.system/<plat>/bin/install.sh` +
-      `minui-launch-shim.sh` → `.system/<plat>/paks/MinUI.pak/launch.sh` copies) and
-      the shim sources `workspace/{tg5040,tg5050}/install/{install-shim,minui-launch-shim}.sh`.
-      Ordering trap: a pre-flatten card's still-running OLD `install.sh` /
-      `MinUI.pak/launch.sh` are what re-exec into the freshly-unzipped tree, so
-      dropping the shims while v1.4.1-direct updates still ship makes such an update
-      finish **without launching** — it self-heals on the next power-on, but
-      migration never ran that boot.
-- [ ] Remove migrate-paks.sh's legacy `.system/<plat>` section (step 3, the
-      `legacy_sys` prune/remove) and its `/tmp/nx_legacy_boot` (`NX_LEGACY_FLAG`)
-      handling in the SAME pass — the flag only exists because a shim set it, so the
-      prune-vs-remove branch is meaningless once the shims are gone. (If the pak
-      cleanup above already retired all of migrate-paks.sh, this is moot; if not,
-      this is the part that outlives it.)
-
-**Not sunset — permanent maintenance.** The device-marker cleanup
-`rm -f $SDCARD_PATH/tg5040-brick tg5040-brickpro tg5040-smartpro tg5050-smartpros`
-is hardcoded in THREE places — `workspace/tg5040/install/boot.sh`,
-`workspace/tg5050/install/boot.sh`, and
-`workspace/all/show2/boot-integration-example.sh` — and must be kept in sync with
-the Makefile `DEVICES` list every time a device is added. This is ongoing upkeep,
-not part of the transition teardown; none of the removals above touch it.
-
----
-
 ## DC pre-launch options: no launch transition into the editor (cosmetic)
 
 **Recorded:** 2026-07-30, noted while moving the pre-launch options gotchas into
@@ -270,3 +209,76 @@ Method, so the number holds up (the spike figures in `.dev/spikes/minarch-gpu/RE
       per device (Brick + Smart Pro S). Report the mean and range, then libretro ÷ standalone − 1 as the percentage.
 - [ ] Put the table plus one summary line per device in the PR description, e.g. "Soulcalibur runs N % faster on the
       Brick (X % vs Y % of full speed)". Keep the raw windows in `RESULTS.md`.
+
+---
+
+## Music player: replace fdk-aac with FFmpeg's native AAC decoder (7.1+)
+
+**Decided:** 2026-10-07 (owner). `libfdk-aac.so` (fdk-aac v0.1.6, a TrimUI-SDK prebuilt in
+`workspace/all/musicplayer/include/fdk_aac/lib/`) is under the FDK-AAC license, which the FSF
+lists as GPL-incompatible, and `musicplayer.elf` + `musicplayerd.elf` (GPLv3) link it
+(`-lfdk-aac`, `workspace/all/musicplayer/Makefile`). A GPLv3 linking exception isn't an option:
+the binaries also link `common/` code from many other authors (MinUI, NextUI contributors).
+
+Replace it with a static, minimal libavcodec from **FFmpeg ≥ 7.1** (LGPL-2.1+, no
+`--enable-gpl`), float `aac` decoder (7.1 added xHE-AAC/USAC, float decoder only; the float
+decoder also has AArch64 NEON, `aac_fixed` doesn't).
+
+- [ ] Build script (toolchain image) for a minimal static FFmpeg 7.1+:
+      `--disable-everything --enable-decoder=aac --enable-decoder=aac_latm --enable-parser=aac
+      --enable-parser=aac_latm --disable-programs --enable-static --disable-shared`, sha256-pinned
+      tarball; build it in CI next to ffplay (could share the FFmpeg version with ffplay's build).
+- [ ] Port the four fdk call paths (~30 `aacDecoder_*` calls, `player.c` + `radio.c`):
+      `.m4a` via minimp4 (DSI → `extradata`, one `avcodec_send_packet` per MP4 sample), `.aac`
+      ADTS files, Icecast/ICY AAC/AAC+ streams, and HLS radio (our TS demux → ADTS). ADTS paths
+      need `av_parser_parse2` to split frames (fdk took arbitrary byte chunks via `Fill`).
+- [ ] Output is planar float (FLTP): add interleave + clamp to our s16 path. Seek =
+      `avcodec_flush_buffers`; take rate/channels from `frame->sample_rate`/`ch_layout`.
+- [ ] Check HE-AAC (implicit SBR) `.m4a`: today the rate comes from the stsd box, not the
+      decoder, which can be half the real output rate.
+- [ ] Device-test LC, HE-AAC v1/v2 radio ("aacp"), m4a seek, HLS rate changes; measure the
+      size of the two ELFs (estimate +0.5–0.9 MB each).
+- [ ] Remove `include/fdk_aac/` and the `libfdk-aac.so*` copy in the root `Makefile`, and
+      `licenses/fdk-aac.txt`.
+
+Fallback if this stalls: faad2 (GPL-2.0-or-later, API close to fdk's, no USAC).
+
+---
+
+## Files tool: replace NextCommander with our own copy of od-contrib/commander (MIT)
+
+**Decided:** 2026-10-07 (owner asked; recommendation recorded). The Files tool is
+`LoveRetro/NextCommander` (cloned `--depth 1`, unpinned, in `workspace/<plat>/Makefile`, plus
+`workspace/all/other/NextCommander.patch`). Nothing in its lineage has a license — LoveRetro ←
+OnionUI ← gcwnow ← the original DinguxCommander — so strictly it is all-rights-reserved and we
+can't redistribute it. Forking the *original* DinguxCommander doesn't help: it was published
+without a license too.
+
+`od-contrib/commander` (OD Commander, Gleb Mazovetskiy) forked DinguxCommander, rewrote most of
+the code, replaced all icons, and added an **MIT** `LICENSE.txt` (commit 6023665431: "The
+original code and icons were published without a license. Since then, most of the code has
+been rewritten and all of the icons have been replaced"). It supports SDL2 and has
+controller-button handling.
+
+**Copy, don't GitHub-fork (decided 2026-10-07):** make our own standalone repo (e.g.
+`nx-commander` under the owner's account) — `git clone` od-contrib/commander and push it to a new
+empty repo, so the history comes along but the repo is **outside their fork network**. A
+GitHub "Fork" survives the owner deleting or privatising their repo, but a DMCA notice that
+claims the whole fork network can take every fork down at once; a standalone copy is only hit if
+it is named itself. The MIT grant we received can't be revoked either way. The remaining risk is
+a claim by the original DinguxCommander author over leftover unlicensed code — that hits any copy
+that is named, so the more of it we rewrite, the smaller it gets.
+
+- [ ] Create the standalone repo from od-contrib/commander; keep its MIT `LICENSE.txt` and
+      copyright line, and say in its README it is based on od-contrib/commander (Gleb Mazovetskiy).
+- [ ] Port what NextCommander adds for us (diff NextCommander against its DinguxCommander base +
+      our `NextCommander.patch`: SDL2/TrimUI input, NextUI theming/fonts, screen size) as commits
+      in our repo.
+- [ ] Build from **our** repo at a pinned full commit hash, never from upstream (swap the
+      unpinned `--depth 1` clone in `workspace/<plat>/Makefile`, and the copy in
+      `workspace/<plat>/platform/Makefile.copy`); keep `Files.pak` paths/behaviour unchanged.
+      Optionally attach its source tarball to each GitHub release so shipped code always has its
+      source beside it.
+- [ ] Replace `licenses/nextcommander.txt` with the OD Commander MIT text; update the README
+      credit line (`skeleton/BASE/README.txt`, "Licenses and credits").
+- [ ] Device-test on Brick + Smart Pro S (browse, copy/move, text/image viewer, keyboard).

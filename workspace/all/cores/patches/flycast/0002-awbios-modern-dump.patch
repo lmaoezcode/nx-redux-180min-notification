@@ -1,3 +1,4 @@
+# license: modifies Flycast (https://github.com/flyinghead/flycast), GPL-2.0 (LICENSE); this patch is distributed under the same license.
 diff --git a/core/hw/naomi/naomi_roms.cpp b/core/hw/naomi/naomi_roms.cpp
 index 2e3aa05..1e1ef45 100644
 --- a/core/hw/naomi/naomi_roms.cpp

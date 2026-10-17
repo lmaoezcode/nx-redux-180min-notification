@@ -1,3 +1,4 @@
+# license: modifies PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later (LICENSE.TXT); this patch is distributed under the same license.
 # NX_PPSSPP_ASSETS (set by PSP.pak launch.sh) points the core at the assets shipped
 # inside the system pak instead of <system dir>/PPSSPP (Bios/PSP, the player's space).
 diff --git a/libretro/libretro.cpp b/libretro/libretro.cpp

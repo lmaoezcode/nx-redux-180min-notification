@@ -7,8 +7,8 @@
 
 #include "gameinfo_text.h"
 
-#define ELLIPSIS "\xE2\x80\xA6"
-#define ENSP_EM 0.5f // the en space after "This month" (a pad: the UI font has no U+2002)
+#define ELLIPSIS "..." // as Home's cut text (GFX_truncateText) and the game lists' (InfoBand, caption_fit)
+#define ENSP_EM 0.5f   // the en space after "This month" (a pad: the UI font has no U+2002)
 
 int HomeStrip_lineCount(const StripInput* in) {
 	if (in->fresh)
@@ -68,37 +68,39 @@ void HomeStrip_build(const StripInput* in, StripLine* l1, StripLine* l2) {
 	bool none = in->ready && in->total <= 0;
 	char buf[64];
 
-	// line 1: This month <time | No play yet | …> · <n achievements | Sign in>
-	add(l1, STRIP_GREY, "This month");
-	StripRun* v;
+	// nothing played this month: the only line is a nudge, with no time and no achievements count
 	if (none) {
-		v = add(l1, STRIP_GREY, "No play yet");
-	} else {
-		if (in->ready)
-			GameInfo_durationText(in->total, buf, sizeof(buf));
-		else
-			snprintf(buf, sizeof(buf), ELLIPSIS);
-		v = add(l1, STRIP_WHITE, buf);
+		add(l1, STRIP_GREY, "Nothing played yet.");
+		StripRun* go = add(l1, STRIP_WHITE, "Let's go!");
+		if (go)
+			go->pad_l = ENSP_EM;
+		return;
 	}
+
+	// line 1: This month <time | ...> · <n achievements>; not signed in to RetroAchievements, the line ends with the time
+	add(l1, STRIP_GREY, "This month");
+	if (in->ready)
+		GameInfo_durationText(in->total, buf, sizeof(buf));
+	else
+		snprintf(buf, sizeof(buf), ELLIPSIS);
+	StripRun* v = add(l1, STRIP_WHITE, buf);
 	if (v)
 		v->pad_l = ENSP_EM;
-	StripRun* dot = add(l1, STRIP_DOT, "\xC2\xB7");
-	if (dot)
-		dot->pad_l = dot->pad_r = 0.28f;
 	if (in->signed_in) {
+		StripRun* dot = add(l1, STRIP_DOT, "\xC2\xB7");
+		if (dot)
+			dot->pad_l = dot->pad_r = 0.28f;
 		if (in->ready)
-			snprintf(buf, sizeof(buf), "%d", none ? 0 : in->unlocks);
+			snprintf(buf, sizeof(buf), "%d", in->unlocks);
 		else
 			snprintf(buf, sizeof(buf), ELLIPSIS);
 		add(l1, STRIP_WHITE, buf);
 		add(l1, STRIP_GREY, " achievements");
-	} else {
-		add(l1, STRIP_GREY, "Sign in");
 	}
 	if (lines < 2)
 		return;
 
-	// line 2: Most played <title> <time>; before the first computation "…" and no time
+	// line 2: Most played <title> <time>; before the first computation "..." and no time
 	add(l2, STRIP_GREY, "Most played");
 	StripRun* t = add(l2, STRIP_WHITE, "");
 	if (!t)

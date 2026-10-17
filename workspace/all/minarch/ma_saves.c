@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "config.h"
 #include "ma_saves.h"
+#include "ma_save_paths.h"
 #include "notification.h"
 #include "ra_integration.h"
 #include <errno.h>
@@ -13,17 +14,9 @@
 #include "streams/file_stream.h"
 #endif
 
-// strip a 1-4 letter extension (plus dot), matching getDisplayName's rule
-static void stripExtension(char* work_name) {
-	char* tmp = strrchr(work_name, '.');
-	if (tmp != NULL && strlen(tmp) > 2 && strlen(tmp) <= 5) {
-		tmp[0] = '\0';
-	}
-}
-
 // filename must be a MAX_PATH-sized buffer
 static void formatSavePath(char* work_name, char* filename, const char* suffix) {
-	stripExtension(work_name);
+	SavePaths_stripExtension(work_name);
 	snprintf(filename, MAX_PATH, "%s/%s%s", core.saves_dir, work_name, suffix);
 }
 
@@ -170,33 +163,14 @@ void RTC_write(void) {
 
 int state_slot = 0;
 
+// filename must be a MAX_PATH-sized buffer; returns -1 if the path was
+// truncated (it may then name a different slot)
+int State_getSlotPath(int slot, char* filename) {
+	return SavePaths_state(filename, MAX_PATH, core.states_dir, game.alt_name, CFG_getStateFormat(), slot);
+}
 // filename must be a MAX_PATH-sized buffer
 void State_getPath(char* filename) {
-	char work_name[MAX_PATH];
-
-	// This is only here for compatibility with older versions of minarch,
-	// should probably be removed at some point in the future.
-	if (CFG_getStateFormat() == STATE_FORMAT_SRM_EXTRADOT || CFG_getStateFormat() == STATE_FORMAT_SRM_UNCOMPRESSED_EXTRADOT) {
-		strcpy(work_name, game.alt_name);
-		stripExtension(work_name);
-
-		if (state_slot == AUTO_RESUME_SLOT)
-			snprintf(filename, MAX_PATH, "%s/%s.state.auto", core.states_dir, work_name);
-		else
-			snprintf(filename, MAX_PATH, "%s/%s.state.%i", core.states_dir, work_name, state_slot);
-	} else if (CFG_getStateFormat() == STATE_FORMAT_SRM || CFG_getStateFormat() == STATE_FORMAT_SRM_UNCOMPRESSED) {
-		strcpy(work_name, game.alt_name);
-		stripExtension(work_name);
-
-		if (state_slot == AUTO_RESUME_SLOT)
-			snprintf(filename, MAX_PATH, "%s/%s.state.auto", core.states_dir, work_name);
-		else if (state_slot == 0)
-			snprintf(filename, MAX_PATH, "%s/%s.state", core.states_dir, work_name);
-		else
-			snprintf(filename, MAX_PATH, "%s/%s.state%i", core.states_dir, work_name, state_slot);
-	} else {
-		snprintf(filename, MAX_PATH, "%s/%s.st%i", core.states_dir, game.alt_name, state_slot);
-	}
+	State_getSlotPath(state_slot, filename);
 }
 
 #define RASTATE_HEADER_SIZE 16
@@ -508,6 +482,24 @@ void State_autosave(void) {
 	State_write();
 	state_slot = last_state_slot;
 }
+// A resume the core refused before its first frame (mupen64plus-next only
+// accepts states once its emulation thread runs): retried from run_frame.
+#define RESUME_RETRY_EVERY 10 // frames between attempts
+#define RESUME_RETRY_MAX 30	  // ~5 s at 60 fps, then the game just starts fresh
+static int pending_resume_slot = -1;
+static int pending_resume_wait = 0;
+static int pending_resume_tries = 0;
+
+static int State_readSlot(int slot) {
+	int last_state_slot = state_slot;
+	state_slot = slot;
+	int ok = State_read();
+	state_slot = last_state_slot;
+	if (ok)
+		Rewind_on_state_change();
+	return ok;
+}
+
 void State_resume(void) {
 	if (!exists(RESUME_SLOT_PATH))
 		return;
@@ -517,9 +509,25 @@ void State_resume(void) {
 	if (slot < 0 || slot > AUTO_RESUME_SLOT)
 		return; // corrupt slot file
 
+	if (State_readSlot(slot) || RA_isHardcoreModeActive())
+		return;
+	char filename[MAX_PATH];
 	int last_state_slot = state_slot;
 	state_slot = slot;
-	State_read();
+	State_getPath(filename);
 	state_slot = last_state_slot;
-	Rewind_on_state_change();
+	if (!exists(filename))
+		return;
+	pending_resume_slot = slot;
+	pending_resume_wait = RESUME_RETRY_EVERY;
+	pending_resume_tries = 0;
+	LOG_info("Resume state not accepted yet, retrying once the core runs\n");
+}
+
+void State_resumePending(void) {
+	if (pending_resume_slot < 0 || --pending_resume_wait > 0)
+		return;
+	pending_resume_wait = RESUME_RETRY_EVERY;
+	if (State_readSlot(pending_resume_slot) || ++pending_resume_tries >= RESUME_RETRY_MAX)
+		pending_resume_slot = -1;
 }

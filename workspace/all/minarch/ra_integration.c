@@ -21,6 +21,7 @@
 #include <rcheevos/rc_client.h>
 #include <rcheevos/rc_libretro.h>
 #include <rcheevos/rc_hash.h>
+#include <rcheevos/rc_api_runtime.h>
 
 // Logging macros - use NextUI log levels
 #define RA_LOG_DEBUG(fmt, ...) LOG_debug("[RA] " fmt, ##__VA_ARGS__)
@@ -34,6 +35,8 @@
 
 static rc_client_t* ra_client = NULL;
 static bool ra_game_loaded = false;
+// RA answered but has no set for this file's hash (an unsupported dump)
+static bool ra_game_unknown = false;
 static bool ra_logged_in = false;
 
 // Current game hash (for mute file path)
@@ -74,6 +77,7 @@ typedef struct {
 	uint8_t* rom_data;
 	size_t rom_size;
 	char emu_tag[16];
+	char core_name[64];
 	bool active;
 } RAPendingLoad;
 
@@ -86,15 +90,28 @@ typedef struct {
 	uint32_t next_time; // SDL_GetTicks() timestamp for next retry
 	bool pending;
 	bool notified_connecting; // Track if we showed "Connecting..." notification
+	bool notified_failed;	  // "Connection failed" shown once per session
+	bool gave_up;			  // launch retries exhausted; next try on menu open
 } RALoginRetry;
 
 static RALoginRetry ra_login_retry = {0};
 
-// Background journal sync (runs once after a successful online login)
+// Background journal sync: after the first online login, and - for an
+// offline session with WiFi connected - when the in-game menu opens and when
+// the game quits. No timer: nothing polls the network during play.
 static SDL_Thread* ra_sync_thread = NULL;
 static volatile bool ra_sync_done = false;
 static volatile int ra_sync_synced = 0;
+static volatile bool ra_sync_cancel = false;
 static bool ra_sync_started = false;
+static char ra_sync_user[64]; // the worker's own copies: RA_quit may detach it
+static char ra_sync_token[64];
+
+// RA_init runs before Notification_init, which drops earlier pushes: its
+// notice waits here for RA_loadGame
+static const char* ra_init_notice = NULL;
+// how long quitting the game may wait for its final upload
+#define RA_QUIT_SYNC_WAIT_MS 3000
 
 /*****************************************************************************
  * Thread-safe response queue
@@ -128,7 +145,8 @@ static void ra_process_queued_responses(void);
 
 // Forward declarations for helper functions
 static void ra_clear_pending_game(void);
-static void ra_do_load_game(const char* rom_path, const uint8_t* rom_data, size_t rom_size, const char* emu_tag);
+static void ra_do_load_game(const char* rom_path, const uint8_t* rom_data, size_t rom_size, const char* emu_tag,
+							const char* core_name);
 static void ra_load_muted_achievements(void);
 static void ra_save_muted_achievements(void);
 static void ra_clear_muted_achievements(void);
@@ -138,6 +156,7 @@ static void RA_setAchievementMuted(uint32_t achievement_id, bool muted);
 static uint32_t ra_get_retry_delay_ms(int attempt);
 static void ra_login_callback(int result, const char* error_message, rc_client_t* client, void* userdata);
 static int ra_sync_thread_fn(void* data);
+static bool ra_try_sync(const char* reason);
 
 /*****************************************************************************
  * Helper: Get retry delay for login attempts
@@ -157,6 +176,8 @@ static void ra_reset_login_state(void) {
 	ra_login_retry.pending = false;
 	ra_login_retry.next_time = 0;
 	ra_login_retry.notified_connecting = false;
+	ra_login_retry.notified_failed = false;
+	ra_login_retry.gave_up = false;
 }
 
 /*****************************************************************************
@@ -631,9 +652,19 @@ static void ra_http_callback(HTTP_Response* response, void* userdata) {
 
 	// Online write-through cache: mirror successful responses to disk so
 	// they can be served when offline
+	char* merged = NULL;
 	if (body && http_status == 200 && data->post_data_copy &&
 		RA_Offline_getMode() == RA_NET_ONLINE) {
 		RA_Offline_cacheResponse(data->post_data_copy, body, body_length);
+		// the game's session can arrive before the background sync has
+		// uploaded the journal: merge those unlocks so they don't show as
+		// locked until the next launch
+		size_t merged_len = 0;
+		merged = RA_Offline_mergeSession(data->post_data_copy, body, body_length, &merged_len);
+		if (merged) {
+			body = merged;
+			body_length = merged_len;
+		}
 	}
 
 	if (data->background && ra_bg_begin()) {
@@ -652,8 +683,43 @@ static void ra_http_callback(HTTP_Response* response, void* userdata) {
 	if (response) {
 		HTTP_freeResponse(response);
 	}
+	free(merged);
 	free(data->post_data_copy);
 	free(data);
+}
+
+typedef struct {
+	rc_client_server_callback_t callback; // rc_client's own award callback
+	void* callback_data;
+	char user[64];
+	char hash[64];
+	uint32_t achievement_id;
+} RA_AwardCall;
+
+// Runs on the main thread (queued like every other response). Accepted,
+// already unlocked, or the achievement removed server-side is final, so the
+// journal entry goes; anything else (no response, auth failure, 5xx, a
+// captive-portal page) keeps it for the next sync.
+static void ra_award_callback(const rc_api_server_response_t* server_response,
+							  void* callback_data) {
+	RA_AwardCall* award = (RA_AwardCall*)callback_data;
+	RA_AwardOutcome outcome = RA_Offline_classifyAwardResponse(
+		server_response->http_status_code, server_response->body, server_response->body_length);
+	if (outcome != RA_AWARD_RETRY)
+		RA_Offline_removePending(award->user, award->achievement_id, award->hash);
+	if (outcome == RA_AWARD_ACCEPTED) {
+		// keep the cached login's totals current so the RetroAchievements
+		// pak doesn't show the pre-session score until the next login.
+		// "already unlocked" answers omit them (parsed as 0): skip those.
+		rc_api_award_achievement_response_t response;
+		if (rc_api_process_award_achievement_server_response(&response, server_response) == RC_OK &&
+			(response.new_player_score || response.new_player_score_softcore))
+			RA_Offline_updateCachedScores(response.new_player_score,
+										  response.new_player_score_softcore);
+		rc_api_destroy_award_achievement_response(&response);
+	}
+	award->callback(server_response, award->callback_data);
+	free(award);
 }
 
 static void ra_server_call(const rc_api_request_t* request,
@@ -675,6 +741,24 @@ static void ra_server_call(const rc_api_request_t* request,
 				ra_queue_push(body, body_len, status, callback, callback_data);
 			free(body);
 			return;
+		}
+	}
+
+	// Online unlock: journal it before sending so it survives a quit while
+	// the connection is down (rc_client only retries in memory), and clear
+	// the entry once the server has answered it
+	if (RA_Offline_journalAward(request->post_data)) {
+		RA_AwardCall* award = (RA_AwardCall*)calloc(1, sizeof(RA_AwardCall));
+		if (award) {
+			char a[16] = {0};
+			RA_Offline_getParam(request->post_data, "u", award->user, sizeof(award->user));
+			RA_Offline_getParam(request->post_data, "m", award->hash, sizeof(award->hash));
+			RA_Offline_getParam(request->post_data, "a", a, sizeof(a));
+			award->achievement_id = (uint32_t)strtoul(a, NULL, 10);
+			award->callback = callback;
+			award->callback_data = callback_data;
+			callback = ra_award_callback;
+			callback_data = award;
 		}
 	}
 
@@ -824,7 +908,7 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 
 	case RC_CLIENT_EVENT_DISCONNECTED:
 		RA_LOG_WARN("Disconnected - unlocks pending\n");
-		Notification_push(NOTIFICATION_ACHIEVEMENT, "RetroAchievements: Offline mode", NULL);
+		Notification_push(NOTIFICATION_ACHIEVEMENT, "RetroAchievements: offline, unlocks will sync later", NULL);
 		break;
 
 	case RC_CLIENT_EVENT_RECONNECTED:
@@ -841,13 +925,27 @@ static void ra_event_handler(const rc_client_event_t* event, rc_client_t* client
 /*****************************************************************************
  * Background journal sync (after online login)
  *****************************************************************************/
+static int ra_sync_cancelled(void* userdata) {
+	(void)userdata;
+	return ra_sync_cancel;
+}
+
 static int ra_sync_thread_fn(void* data) {
 	PWR_pinHelperThread(); // minarch_cpu_affinity=big -> SLOW set (no-op otherwise)
 	(void)data;
-	int synced = RA_OfflineNet_syncAll(CFG_getRAUsername(), CFG_getRAToken(), NULL, NULL);
+	int synced = RA_OfflineNet_syncAllEx(ra_sync_user, ra_sync_token, NULL, ra_sync_cancelled, NULL);
 	ra_sync_synced = synced;
 	ra_sync_done = true; // picked up on the main thread in RA_idle
 	return 0;
+}
+
+static bool ra_start_sync(void) {
+	snprintf(ra_sync_user, sizeof(ra_sync_user), "%s", CFG_getRAUsername());
+	snprintf(ra_sync_token, sizeof(ra_sync_token), "%s", CFG_getRAToken());
+	ra_sync_cancel = false;
+	ra_sync_done = false;
+	ra_sync_thread = SDL_CreateThread(ra_sync_thread_fn, "ra_offline_sync", NULL);
+	return ra_sync_thread != NULL;
 }
 
 /*****************************************************************************
@@ -884,18 +982,15 @@ static void ra_login_callback(int result, const char* error_message,
 		if (ra_pending_load.active) {
 			RA_LOG_DEBUG("Processing deferred game load: %s\n", ra_pending_load.rom_path);
 			ra_do_load_game(ra_pending_load.rom_path, ra_pending_load.rom_data,
-							ra_pending_load.rom_size, ra_pending_load.emu_tag);
+							ra_pending_load.rom_size, ra_pending_load.emu_tag, ra_pending_load.core_name);
 			ra_clear_pending_game();
 		}
 
 		// First online login of the session: flush any journaled offline
 		// unlocks in the background
-		if (RA_Offline_getMode() == RA_NET_ONLINE && !ra_sync_started &&
+		if (RA_Offline_getMode() == RA_NET_ONLINE && !ra_sync_started && !ra_sync_thread &&
 			RA_Offline_pendingCount() > 0) {
-			ra_sync_started = true;
-			ra_sync_thread = SDL_CreateThread(ra_sync_thread_fn, "ra_offline_sync", NULL);
-			if (!ra_sync_thread)
-				ra_sync_started = false;
+			ra_sync_started = ra_start_sync();
 		}
 	} else {
 		// Failure - attempt retry or give up
@@ -928,8 +1023,20 @@ static void ra_login_callback(int result, const char* error_message,
 		} else {
 			// All retries exhausted
 			RA_LOG_ERROR("All login retries exhausted\n");
+			bool rejected = result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN ||
+							result == RC_ACCESS_DENIED;
 			if (RA_Offline_getMode() == RA_NET_ONLINE && RA_Offline_hasLoginCache()) {
 				ra_fallback_to_offline();
+			} else if (RA_Offline_getMode() == RA_NET_ONLINE && !rejected) {
+				// Nothing cached to fall back on (never logged in on this
+				// device): keep the deferred game, and try once more when
+				// the in-game menu opens (RA_onMenuOpen) instead of polling
+				if (!ra_login_retry.notified_failed) {
+					ra_login_retry.notified_failed = true;
+					Notification_push(NOTIFICATION_ACHIEVEMENT,
+									  "RetroAchievements: Connection failed", NULL);
+				}
+				ra_login_retry.gave_up = true;
 			} else {
 				Notification_push(NOTIFICATION_ACHIEVEMENT,
 								  "RetroAchievements: Connection failed", NULL);
@@ -1061,14 +1168,19 @@ static void ra_game_loaded_callback(int result, const char* error_message,
 			}
 
 			char message[NOTIFICATION_MAX_MESSAGE];
-			snprintf(message, sizeof(message), "%s - %u/%u achievements",
-					 game->title, display_unlocked, display_total);
+			if (display_total == 0)
+				snprintf(message, sizeof(message), "%s - no achievements yet", game->title);
+			else
+				snprintf(message, sizeof(message), "%s - %u/%u achievements",
+						 game->title, display_unlocked, display_total);
 			Notification_push(NOTIFICATION_ACHIEVEMENT, message, NULL);
 		} else {
 			RA_LOG_WARN("Game not recognized by RetroAchievements\n");
+			ra_game_unknown = true;
 		}
 	} else {
 		ra_game_loaded = false;
+		ra_game_unknown = (result == RC_NO_GAME_LOADED);
 		RA_LOG_ERROR("Game load failed: %s\n", error_message ? error_message : "unknown error");
 	}
 }
@@ -1108,14 +1220,12 @@ void RA_init(void) {
 	if (!online) {
 		if (!RA_Offline_hasLoginCache()) {
 			RA_LOG_WARN("Offline with no cached login - RA disabled this session\n");
-			Notification_push(NOTIFICATION_ACHIEVEMENT,
-							  "RetroAchievements requires WiFi for first-time setup", NULL);
+			ra_init_notice = "RetroAchievements requires WiFi for first-time setup";
 			return;
 		}
 		RA_Offline_setMode(RA_NET_OFFLINE);
 		RA_LOG_INFO("Starting in offline mode (softcore)\n");
-		Notification_push(NOTIFICATION_ACHIEVEMENT,
-						  "RetroAchievements: offline (softcore)", NULL);
+		ra_init_notice = "RetroAchievements: offline (softcore)";
 	}
 
 	RA_LOG_INFO("Initializing...\n");
@@ -1181,10 +1291,24 @@ void RA_quit(void) {
 	// and must not outlive the client or the state torn down below
 	ra_bg_quit();
 
-	// Wait for a background journal sync to finish (it holds no RA state,
-	// but must not outlive HTTP/config teardown)
+	// Last chance to upload unlocks still in the journal (an offline
+	// session's, or an online award that never got through), so they don't
+	// wait for the next launch. If it can't finish in RA_QUIT_SYNC_WAIT_MS
+	// it is cancelled and detached: it holds no RA state, works on its own
+	// credential copies, and entries it didn't confirm stay journaled for the
+	// next launch or a manual sync in the RetroAchievements pak.
+	if (ra_logged_in)
+		ra_try_sync("quitting");
 	if (ra_sync_thread) {
-		SDL_WaitThread(ra_sync_thread, NULL);
+		uint32_t start = SDL_GetTicks();
+		while (!ra_sync_done && SDL_GetTicks() - start < RA_QUIT_SYNC_WAIT_MS)
+			SDL_Delay(10);
+		if (ra_sync_done) {
+			SDL_WaitThread(ra_sync_thread, NULL);
+		} else {
+			ra_sync_cancel = true;
+			SDL_DetachThread(ra_sync_thread);
+		}
 		ra_sync_thread = NULL;
 	}
 	ra_sync_started = false;
@@ -1218,6 +1342,7 @@ void RA_quit(void) {
 	ra_queue_quit();
 
 	ra_game_loaded = false;
+	ra_game_unknown = false;
 	ra_logged_in = false;
 }
 
@@ -1267,6 +1392,13 @@ void RA_setMemoryMap(const void* mmap) {
 	RA_LOG_DEBUG("Memory map set by core: %u descriptors (deep copied)\n", ra_memory_map->num_descriptors);
 }
 
+// A core can expose its RAM only once emulation has started (mupen64plus-next
+// allocates RDRAM and sets its memory map inside the first retro_run), after
+// the regions below were built at game load. Remember the console and rebuild
+// the regions once, the first frame the core reports system RAM.
+static uint32_t ra_regions_console = 0;
+static bool ra_regions_need_memory = false;
+
 static void RA_initMemoryRegions(uint32_t console_id) {
 	// Clean up any existing regions
 	if (ra_memory_regions_initialized) {
@@ -1280,10 +1412,14 @@ static void RA_initMemoryRegions(uint32_t console_id) {
 	int result = rc_libretro_memory_init(&ra_memory_regions, ra_memory_map,
 										 ra_get_core_memory_info, console_id);
 
+	ra_regions_console = console_id;
+	ra_regions_need_memory = !ra_memory_map && !(ra_get_memory_data && ra_get_memory_data(0));
 	if (result) {
 		ra_memory_regions_initialized = true;
-		RA_LOG_DEBUG("Memory regions initialized: %u regions, %zu total bytes\n",
-					 ra_memory_regions.count, ra_memory_regions.total_size);
+		RA_LOG_INFO("Memory regions initialized: %u regions, %zu total bytes (map=%d ram=%p)%s\n",
+					ra_memory_regions.count, ra_memory_regions.total_size, ra_memory_map != NULL,
+					ra_get_memory_data ? ra_get_memory_data(0) : NULL,
+					ra_regions_need_memory ? " - core RAM not up yet, will retry" : "");
 	} else {
 		RA_LOG_WARN("Warning: Failed to initialize memory regions for console %u\n", console_id);
 	}
@@ -1300,71 +1436,26 @@ static void ra_clear_pending_game(void) {
 	ra_pending_load.rom_size = 0;
 	ra_pending_load.rom_path[0] = '\0';
 	ra_pending_load.emu_tag[0] = '\0';
+	ra_pending_load.core_name[0] = '\0';
 	ra_pending_load.active = false;
-}
-
-/*****************************************************************************
- * Helper: Check if a file extension indicates a CD image
- *****************************************************************************/
-static int ra_is_cd_extension(const char* path) {
-	if (!path)
-		return 0;
-
-	const char* ext = strrchr(path, '.');
-	if (!ext)
-		return 0;
-	ext++; // skip the dot
-
-	// Common CD image extensions
-	return (strcasecmp(ext, "chd") == 0 ||
-			strcasecmp(ext, "cue") == 0 ||
-			strcasecmp(ext, "ccd") == 0 ||
-			strcasecmp(ext, "toc") == 0 ||
-			strcasecmp(ext, "m3u") == 0);
 }
 
 /*****************************************************************************
  * Helper: Actually load the game (internal, assumes logged in)
  *****************************************************************************/
-static void ra_do_load_game(const char* rom_path, const uint8_t* rom_data, size_t rom_size, const char* emu_tag) {
+static void ra_do_load_game(const char* rom_path, const uint8_t* rom_data, size_t rom_size, const char* emu_tag,
+							const char* core_name) {
 	strncpy(ra_current_rom_path, rom_path, sizeof(ra_current_rom_path) - 1);
 	ra_current_rom_path[sizeof(ra_current_rom_path) - 1] = '\0';
+	ra_game_unknown = false;
 
-	int console_id = RA_getConsoleId(emu_tag);
+	// core + ROM extension + tag (ra_consoles.h): resolved before the load so
+	// the memory regions below exist when rcheevos validates addresses
+	int console_id = RA_detectConsole(emu_tag, core_name, rom_path);
 	if (console_id == RC_CONSOLE_UNKNOWN) {
-		RA_LOG_WARN("Unknown console for tag '%s' - achievements disabled\n", emu_tag);
+		RA_LOG_WARN("Can't tell the console for tag '%s', core '%s' - achievements disabled\n",
+					emu_tag ? emu_tag : "", core_name ? core_name : "");
 		return;
-	}
-
-	// Handle consoles that have separate CD variants
-	// PCE tag is used for both HuCard and CD games in NextUI
-	if (console_id == RC_CONSOLE_PC_ENGINE && ra_is_cd_extension(rom_path)) {
-		console_id = RC_CONSOLE_PC_ENGINE_CD;
-		RA_LOG_DEBUG("Detected PC Engine CD image, using console ID %d\n", console_id);
-	}
-	// MD serves cartridge and Sega CD games, and the GPGX tag (Genesis Plus GX)
-	// serves every Sega system under one tag. RA hashes per console, so refine a
-	// Mega Drive base by ROM extension — the same content-based trick as the CD
-	// upgrade above, and the way Genesis Plus GX itself picks the system. This
-	// lets one "GPGX" tag cover Mega Drive/Master System/Game Gear/SG-1000/CD.
-	else if (console_id == RC_CONSOLE_MEGA_DRIVE) {
-		if (ra_is_cd_extension(rom_path)) {
-			console_id = RC_CONSOLE_SEGA_CD;
-			RA_LOG_DEBUG("Detected Sega CD image, using console ID %d\n", console_id);
-		} else {
-			const char* ext = strrchr(rom_path, '.');
-			if (ext) {
-				ext++; // skip the dot
-				if (strcasecmp(ext, "sms") == 0)
-					console_id = RC_CONSOLE_MASTER_SYSTEM;
-				else if (strcasecmp(ext, "gg") == 0)
-					console_id = RC_CONSOLE_GAME_GEAR;
-				else if (strcasecmp(ext, "sg") == 0)
-					console_id = RC_CONSOLE_SG1000;
-			}
-			if (console_id != RC_CONSOLE_MEGA_DRIVE)
-				RA_LOG_DEBUG("Refined Sega console by extension, using console ID %d\n", console_id);
-		}
 	}
 
 	RA_LOG_INFO("Loading game: %s (console: %s, ID: %d)\n",
@@ -1389,7 +1480,12 @@ void RA_setRecordedRomPath(const char* path) {
 	snprintf(ra_record_rom_path, sizeof(ra_record_rom_path), "%s", path ? path : "");
 }
 
-void RA_loadGame(const char* rom_path, const uint8_t* rom_data, size_t rom_size, const char* emu_tag) {
+void RA_loadGame(const char* rom_path, const uint8_t* rom_data, size_t rom_size, const char* emu_tag,
+				 const char* core_name) {
+	if (ra_init_notice) {
+		Notification_push(NOTIFICATION_ACHIEVEMENT, ra_init_notice, NULL);
+		ra_init_notice = NULL;
+	}
 	if (!ra_client || !CFG_getRAEnable()) {
 		return;
 	}
@@ -1415,6 +1511,8 @@ void RA_loadGame(const char* rom_path, const uint8_t* rom_data, size_t rom_size,
 		// Store the emu tag
 		strncpy(ra_pending_load.emu_tag, emu_tag, sizeof(ra_pending_load.emu_tag) - 1);
 		ra_pending_load.emu_tag[sizeof(ra_pending_load.emu_tag) - 1] = '\0';
+		snprintf(ra_pending_load.core_name, sizeof(ra_pending_load.core_name), "%s",
+				 core_name ? core_name : "");
 
 		// Copy ROM data if provided (some cores need it)
 		if (rom_data && rom_size > 0) {
@@ -1433,13 +1531,14 @@ void RA_loadGame(const char* rom_path, const uint8_t* rom_data, size_t rom_size,
 	}
 
 	// Already logged in - load immediately
-	ra_do_load_game(rom_path, rom_data, rom_size, emu_tag);
+	ra_do_load_game(rom_path, rom_data, rom_size, emu_tag, core_name);
 }
 
 void RA_unloadGame(void) {
 	if (!ra_client) {
 		return;
 	}
+	ra_game_unknown = false;
 
 	if (ra_game_loaded) {
 		RA_LOG_INFO("Unloading game\n");
@@ -1468,27 +1567,11 @@ void RA_unloadGame(void) {
 	}
 }
 
-void RA_doFrame(void) {
-	// Process any pending HTTP responses before checking achievements
-	// This ensures game load completes and achievements are active
-	ra_process_queued_responses();
-	RA_Badges_update();
-
-	if (ra_client && ra_game_loaded) {
-		rc_client_do_frame(ra_client);
-	}
-}
-
-void RA_idle(void) {
-	// Process queued HTTP responses on main thread
-	// This must happen even if ra_client is NULL (e.g., during shutdown)
-	// to avoid memory leaks from pending responses
-	ra_process_queued_responses();
-
-	if (!ra_client) {
-		return;
-	}
-
+// Main-thread work that must not wait for the in-game menu (RA_idle only
+// runs when it closes): a login that failed before WiFi came up, e.g. the
+// auto-resume launch after a sleep that ended in power-off, must keep
+// retrying during gameplay or RA stays dead for the whole session.
+static void ra_service_main_thread(void) {
 	// Check for pending login retry
 	if (ra_login_retry.pending && SDL_GetTicks() >= ra_login_retry.next_time) {
 		ra_login_retry.pending = false;
@@ -1511,6 +1594,65 @@ void RA_idle(void) {
 		if (remaining > 0)
 			RA_LOG_WARN("%d journaled unlock(s) still pending after sync\n", remaining);
 	}
+}
+
+// Upload journaled unlocks in the background if there are any and WiFi is
+// connected. Online sessions only need it for unlocks whose award request
+// never got through; offline sessions for everything earned so far.
+static bool ra_try_sync(const char* reason) {
+	if (ra_sync_thread || !CFG_getRAAuthenticated() || !CFG_getRAToken()[0])
+		return false;
+	if (!PLAT_wifiConnected() || RA_Offline_pendingCount() <= 0)
+		return false;
+	RA_LOG_INFO("Syncing journaled unlocks (%s)\n", reason);
+	return ra_start_sync();
+}
+
+void RA_onMenuOpen(void) {
+	if (!ra_client)
+		return;
+	if (ra_login_retry.gave_up && !ra_logged_in) {
+		// one attempt; a failure lands back in the exhausted branch
+		ra_login_retry.gave_up = false;
+		RA_LOG_INFO("Retrying login (menu opened)\n");
+		ra_start_login();
+	} else if (ra_logged_in && RA_Offline_getMode() == RA_NET_OFFLINE) {
+		ra_try_sync("menu opened");
+	}
+}
+
+void RA_doFrame(void) {
+	// Process any pending HTTP responses before checking achievements
+	// This ensures game load completes and achievements are active
+	ra_process_queued_responses();
+	RA_Badges_update();
+
+	if (!ra_client)
+		return;
+
+	ra_service_main_thread();
+
+	if (ra_regions_need_memory && (ra_memory_map || (ra_get_memory_data && ra_get_memory_data(0)))) {
+		RA_LOG_INFO("Core RAM is up now, rebuilding memory regions\n");
+		RA_initMemoryRegions(ra_regions_console);
+	}
+
+	if (ra_game_loaded) {
+		rc_client_do_frame(ra_client);
+	}
+}
+
+void RA_idle(void) {
+	// Process queued HTTP responses on main thread
+	// This must happen even if ra_client is NULL (e.g., during shutdown)
+	// to avoid memory leaks from pending responses
+	ra_process_queued_responses();
+
+	if (!ra_client) {
+		return;
+	}
+
+	ra_service_main_thread();
 
 	rc_client_idle(ra_client);
 
@@ -1522,6 +1664,10 @@ void RA_idle(void) {
 
 bool RA_isGameLoaded(void) {
 	return ra_game_loaded;
+}
+
+bool RA_isGameUnknown(void) {
+	return ra_game_unknown;
 }
 
 bool RA_isHardcoreModeActive(void) {

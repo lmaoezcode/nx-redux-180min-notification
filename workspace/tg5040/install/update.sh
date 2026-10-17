@@ -29,6 +29,24 @@ if [ -n "$MIN_FW" ] && [ -n "$FW" ] && [ "$FW" != "$MIN_FW" ]; then
 fi
 
 # --------------------------------------
+# A failed or interrupted in-app update download used to leave a truncated
+# .tmp_update.zip in the card root (the updater kept the partial file).
+# Windows Explorer opens the root when the card is plugged in and asks for
+# "the last disk of the multi-volume set" on that broken zip. A successful
+# OTA deletes it before rebooting, so anything left here is stale.
+rm -f "$SDCARD_PATH/.tmp_update.zip" "$SDCARD_PATH/.tmp_update.zip.done" "$SDCARD_PATH/.tmp_update.zip.headers" 2>/dev/null
+
+# --------------------------------------
+# The bluez upgrade pakz (in every release) unpacks .update_bluez/ (~26 MB)
+# into the card root, and its post_install.sh used to leave it there on an
+# already-upgraded device; earlier releases also tarred the stock Bluetooth
+# stack into btmgr_<date>.zip, which nothing ever restored from. The pakz
+# has already run by now (boot installs pakz before MinUI.zip), so anything
+# left is stale.
+rm -rf "$SDCARD_PATH/.update_bluez" 2>/dev/null
+rm -f "$SDCARD_PATH"/btmgr_*.zip 2>/dev/null
+
+# --------------------------------------
 # --- psp-standalone-cleanup-begin
 # PSP moved from the standalone PPSSPP pak (ben16w/minui-psp, installed from
 # Xtras into Emus/<platform>/PSP.pak, earlier the flat Emus/PSP.pak) to the
@@ -36,14 +54,12 @@ fi
 # PPSSPPSDL binary, or the PPSSPP/.config shell an Xtras uninstall leaves) has
 # its memory stick carried to the libretro one (Saves/PSP: PPSSPP maps ms0:/PSP
 # straight onto a save dir named PSP) and is removed. Any
-# other user PSP.pak is left to migrate-paks.sh, which removes shipped-name
-# paks. Standalone saves (Saves/PSP/<ID>: the standalone bind-mounted
+# other user PSP.pak is left alone (the shipped PSP.pak wins over a
+# same-named user pak). Standalone saves (Saves/PSP/<ID>: the standalone bind-mounted
 # Saves/PSP as SAVEDATA) move to Saves/PSP/SAVEDATA/<ID>; an existing
 # destination is never overwritten.
 # Standalone save states (.userdata/shared/PSP-ppsspp) are not portable and
-# are left alone. Runs BEFORE migrate-paks.sh, which deletes every shipped-name
-# pak (PSP.pak now ships) from /Emus without carrying texture packs over.
-# One-shot per update; must never fail the update.
+# are left alone. One-shot per update; must never fail the update.
 PSP_SAVES="$SDCARD_PATH/Saves/PSP"
 for PSP_PAK in "$SDCARD_PATH/Emus/tg5040/PSP.pak" "$SDCARD_PATH/Emus/tg5050/PSP.pak" "$SDCARD_PATH/Emus/PSP.pak"; do
 	if ! ls "$PSP_PAK"/PPSSPP/PPSSPPSDL* >/dev/null 2>&1; then
@@ -66,7 +82,20 @@ for PSP_PAK in "$SDCARD_PATH/Emus/tg5040/PSP.pak" "$SDCARD_PATH/Emus/tg5050/PSP.
 		PSP_B="${PSP_B##*/}"
 		[ "$PSP_B" = Emus ] && PSP_B=flat
 		mkdir -p "$PSP_SAVES/standalone-backup" 2>/dev/null
-		[ -e "$PSP_SAVES/standalone-backup/$PSP_B" ] || mv "$PSP_MS" "$PSP_SAVES/standalone-backup/$PSP_B" 2>/dev/null
+		# an earlier update's backup is never reused: a fresh -2, -3, ... name
+		PSP_BK="$PSP_SAVES/standalone-backup/$PSP_B"
+		PSP_I=1
+		while [ -e "$PSP_BK" ]; do
+			PSP_I=$((PSP_I + 1))
+			PSP_BK="$PSP_SAVES/standalone-backup/$PSP_B-$PSP_I"
+		done
+		mv "$PSP_MS" "$PSP_BK" 2>/dev/null
+	fi
+	# the pak goes only once nothing of its memory stick is left in it
+	# (save states, settings): a failed move keeps the whole pak instead
+	if [ -n "$(find "$PSP_MS" -type f 2>/dev/null | head -n 1)" ]; then
+		echo "kept the standalone PPSSPP pak ${PSP_PAK#"$SDCARD_PATH"/}: its memory stick could not be backed up"
+		continue
 	fi
 	rm -rf "$PSP_PAK" && echo "removed the standalone PPSSPP pak ${PSP_PAK#"$SDCARD_PATH"/}"
 	rmdir "${PSP_PAK%/*}" 2>/dev/null
@@ -81,64 +110,6 @@ for PSP_S in "$PSP_SAVES"/*; do
 done
 true
 # --- psp-standalone-cleanup-end
-
-# --------------------------------------
-# clean shipped-name paks out of /Emus and /Tools (moved into .system
-# 2026-07-31; removal of this hook is tracked in DEV_TODO.md);
-# must run before the brick-migration block below, which can reboot without
-# re-running install.sh; must never fail the update
-sh ${SDCARD_PATH}/.system/shared/bin/migrate-paks.sh tg5040 || true
-
-# --------------------------------------
-# remove old brick system folder
-BRICK_PATH=${SDCARD_PATH}/.system/tg3040
-echo "check for $BRICK_PATH"
-# this might always exist so we can pull up old cards
-if [ -d $BRICK_PATH ]; then
-	echo "deleting brick system folder $BRICK_PATH"
-	rm -rf "$BRICK_PATH"
-	
-	# copy brick configs from userdata
-	SRC_PATH=${SDCARD_PATH}/.userdata/tg3040
-	if [ -d $SRC_PATH ]; then
-		DST_PATH=${SDCARD_PATH}/.userdata/tg5040
-		mkdir -p $DST_PATH # just in case
-	
-		for SUB_PATH in $SRC_PATH/*; do
-			if [ -d $SUB_PATH ]; then
-				SUB_NAME=$(basename $SUB_PATH)
-				NEW_PATH=$DST_PATH/$SUB_NAME
-			
-				if [ ! -d $NEW_PATH ]; then
-					echo "creating new path $NEW_PATH"
-					mkdir -p $NEW_PATH
-				fi
-			
-				for CFG_PATH in $SUB_PATH/*.cfg; do
-					if [ -f $CFG_PATH ]; then
-						CFG_NAME=$(basename $CFG_PATH .cfg)
-						echo "copying $CFG_PATH to $NEW_PATH/$CFG_NAME-brick.cfg"
-						cp $CFG_PATH $NEW_PATH/$CFG_NAME-brick.cfg
-					fi
-				done
-			fi
-		done
-		echo "deleting brick userdata $SRC_PATH"
-		rm -rf $SRC_PATH
-		
-		UPDATE_PATH=${SDCARD_PATH}/.tmp_update/tg3040
-		rm -rf $UPDATE_PATH.sh
-		rm -rf $UPDATE_PATH
-		
-		reboot
-		# we need to sleep until reboot otherwise 
-		# it will poweroff without rebooting
-		while :; do
-			sleep 1
-		done
-	fi
-fi
-# --------------------------------------
 
 # --------------------------------------
 # --- portmaster-refresh-begin
@@ -177,16 +148,31 @@ if [ -d "$PM_CATALOG" ] && [ -f "$SDCARD_PATH/Emus/shared/PortMaster/version" ];
 		cp -f "$PM_CATALOG/ports_launch.sh" "$PM_PORTS/launch.sh" 2>/dev/null \
 			&& chmod +x "$PM_PORTS/launch.sh" 2>/dev/null \
 			&& echo "refreshed $PM_PORTS/launch.sh from the Xtras catalog"
+		cp -f "$PM_CATALOG/launch_options.sh" "$PM_CATALOG/launch_options.json" "$PM_PORTS/" 2>/dev/null \
+			&& chmod +x "$PM_PORTS/launch_options.sh" 2>/dev/null \
+			&& echo "refreshed $PM_PORTS Launch Options from the Xtras catalog"
 	fi
 	# gl4es's EGL shim in PortMaster/lib broke Xwayland for Weston ports (the
 	# catalog install.sh no longer keeps it); remove it from existing installs.
 	rm -f "$SDCARD_PATH/Emus/shared/PortMaster/lib/libEGL.so.1" 2>/dev/null
+	# The Weston runtime NX Redux used to bundle (files/libs.zip) was a CrossMix
+	# preview (Westonwrap 0.2.8) whose bare `udevadm trigger` unmounted the SD
+	# card. No runtime ships any more: drop the zip and, only when it is still
+	# that exact preview build, the extracted squashfs, so PortMaster downloads
+	# the official one the next time a port needs it.
+	rm -f "$SDCARD_PATH/Emus/shared/PortMaster/files/libs.zip" 2>/dev/null
+	PM_WESTON="$SDCARD_PATH/Emus/shared/PortMaster/libs/weston_pkg_0.2.squashfs"
+	if [ -f "$PM_WESTON" ] && [ "$(md5sum "$PM_WESTON" 2>/dev/null | cut -d' ' -f1)" = 91dc57a0c0a49c8a3af55fc64711e587 ]; then
+		rm -f "$PM_WESTON" && echo "removed the bundled preview Weston runtime"
+	fi
 	# PortMaster is now version_source=internal; refresh the pak-code marker to
 	# the catalog version so Xtras does not show a phantom "update available"
 	# against an old upstream tag left by a pre-migration install (PM_CATALOG is
 	# the .../portmaster/pak dir, so meta.txt is one level up).
 	PM_VER="$(sed -n 's/^version=//p' "$SDCARD_PATH/.system/paks/Tools/Xtras.pak/catalog/portmaster/meta.txt" 2>/dev/null | head -1 | tr -d '\r')"
-	[ -n "$PM_VER" ] && printf '%s\n' "$PM_VER" > "$SDCARD_PATH/.userdata/shared/xtras/portmaster.version" 2>/dev/null
+	if [ -n "$PM_VER" ]; then # an if, not &&: a missing version must not fail the block
+		printf '%s\n' "$PM_VER" > "$SDCARD_PATH/.userdata/shared/xtras/portmaster.version" 2>/dev/null
+	fi
 fi
 # --- portmaster-refresh-end
 
@@ -211,7 +197,9 @@ if [ -d "$CD_CATALOG/pak" ] && [ -f "$CD_MARK" ]; then
 			&& echo "refreshed $CD_TOOLS from the Xtras catalog"
 	fi
 	CD_VER="$(sed -n 's/^version=//p' "$CD_CATALOG/meta.txt" 2>/dev/null | head -1 | tr -d '\r')"
-	[ -n "$CD_VER" ] && printf '%s\n' "$CD_VER" > "$CD_MARK" 2>/dev/null
+	if [ -n "$CD_VER" ]; then # an if, not &&: a missing version must not fail the block
+		printf '%s\n' "$CD_VER" > "$CD_MARK" 2>/dev/null
+	fi
 fi
 # --- cheatdb-refresh-end
 
@@ -230,4 +218,18 @@ if [ -f "$DC_OLD/overlay_settings.json" ]; then
 	echo "removed the standalone flycast overlay settings"
 fi
 # --- dc-standalone-cleanup-end
+
+# --------------------------------------
+# --- n64-standalone-cleanup-begin
+# N64 moved from the standalone mupen64plus (its own overlay, GLideN64 .so)
+# to mupen64plus-next in minarch. The install replaces
+# .system/paks/Emus wholesale; this removes what the standalone left on the
+# card. Players' standalone saves and states (.userdata/shared/N64-mupen64plus)
+# are never touched: N64.pak's core imports a game's saves from there on first
+# launch. Hi-res texture packs stay in Roms/Nintendo 64 (N64)/.hires_texture.
+# One-shot per update; must never fail the update.
+N64_OLD="$SDCARD_PATH/Emus/shared/mupen64plus"
+[ -d "$N64_OLD" ] && rm -rf "$N64_OLD" && echo "removed the standalone mupen64plus data"
+true
+# --- n64-standalone-cleanup-end
 

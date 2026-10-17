@@ -22,16 +22,22 @@ cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_scraper_system
 /tmp/nx_test_scraper_systems
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_arcade_names ../arcade_names.c test_arcade_names.c
 /tmp/nx_test_arcade_names
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_png_palette ../png_palette.c test_png_palette.c -lz
+/tmp/nx_test_png_palette
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_button_layout test_button_layout.c
 /tmp/nx_test_button_layout
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_next_cmd test_next_cmd.c
 /tmp/nx_test_next_cmd
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_gpu_governor_hold test_gpu_governor_hold.c
 /tmp/nx_test_gpu_governor_hold
-cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_ui_scale test_ui_scale.c
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_ui_scale test_ui_scale.c -lm
 /tmp/nx_test_ui_scale
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_pill_cap test_pill_cap.c -lm
+/tmp/nx_test_pill_cap
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_wiz_caps ../../netplay-wizard/wiz_caps.c test_wiz_caps.c
 /tmp/nx_test_wiz_caps
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_wiz_modes ../../netplay-wizard/wiz_modes.c test_wiz_modes.c
+/tmp/nx_test_wiz_modes
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_core_netplay ../../netplay/core_netplay.c test_core_netplay.c
 /tmp/nx_test_core_netplay
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_menutabs_model ../../nextui/menutabs_model.c test_menutabs_model.c
@@ -54,11 +60,18 @@ cc -std=gnu99 -Wall -Werror -fsanitize=address -g -I../ui -o /tmp/nx_test_infoba
 /tmp/nx_test_infoband_layout
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_collcount_model ../../nextui/collcount_model.c test_collcount_model.c
 /tmp/nx_test_collcount_model
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_tabbg_model ../../nextui/tabbg_model.c test_tabbg_model.c
+/tmp/nx_test_tabbg_model
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_collname ../../nextui/collname.c test_collname.c
 /tmp/nx_test_collname
 sh test_launcher_logs_path.sh
+sh test_nx_launch_opts.sh
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_home_layout ../../nextui/home_layout.c test_home_layout.c -lm
 /tmp/nx_test_home_layout
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_home_carousel_layout ../../nextui/home_carousel_layout.c ../../nextui/row_model.c test_home_carousel_layout.c -lm
+/tmp/nx_test_home_carousel_layout
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_home_list_layout ../../nextui/home_list_layout.c test_home_list_layout.c
+/tmp/nx_test_home_list_layout
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_homeart_model ../../nextui/homeart_model.c test_homeart_model.c
 /tmp/nx_test_homeart_model
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_home_stats_model ../../nextui/home_stats_model.c test_home_stats_model.c
@@ -81,3 +94,20 @@ cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_menustyle test
 /tmp/nx_test_menustyle
 cc -std=gnu99 -Wall -Werror -fsanitize=address -g -I../ui -o /tmp/nx_test_menu_transition ../../nextui/menu_transition.c ../ui/ui_ease.c test_menu_transition.c -lm
 /tmp/nx_test_menu_transition
+cc -std=gnu99 -Wall -Werror -fsanitize=address -g -o /tmp/nx_test_romkey ../../nextui/romkey.c test_romkey.c
+/tmp/nx_test_romkey
+cc -std=gnu99 -Wall -Werror -Wno-deprecated-declarations -fsanitize=address -g -I.. -o /tmp/nx_test_ra_offline test_ra_offline.c ../ra_offline.c
+(cd /tmp && mkdir -p build && /tmp/nx_test_ra_offline)
+# ra_offline_net.c links rcheevos, whose source the minarch build fetches
+RC=../../minarch/rcheevos/src
+if [ -d "$RC/src/rapi" ]; then
+	RC=$(cd "$RC" && pwd)
+	mkdir -p /tmp/nx_rcinc && ln -sfn "$RC/include" /tmp/nx_rcinc/rcheevos
+	cc -std=gnu99 -w -fsanitize=address -g -I.. -I/tmp/nx_rcinc -I"$RC/include" -I"$RC/src" \
+		-o /tmp/nx_test_ra_offline_net test_ra_offline_net.c ../ra_offline_net.c ../ra_offline.c \
+		"$RC"/src/rapi/*.c "$RC"/src/rcheevos/*.c "$RC/src/rc_util.c" "$RC/src/rc_compat.c" \
+		"$RC/src/rc_version.c" "$RC/src/rhash/md5.c"
+	/tmp/nx_test_ra_offline_net
+else
+	echo "test_ra_offline_net: skipped (rcheevos source not fetched)"
+fi

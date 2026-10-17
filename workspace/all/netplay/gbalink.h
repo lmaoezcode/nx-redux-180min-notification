@@ -74,13 +74,35 @@ void GBALink_applyPendingLinkMode(void); // Apply pending mode to config
 // Connection management
 // If hotspot_ip is NULL, uses WiFi mode. Otherwise, uses hotspot mode with given IP.
 // link_mode is the gpsp_serial value to sync with client (can be NULL)
-int GBALink_startHost(const char* game_name, uint32_t game_crc, const char* hotspot_ip, const char* link_mode);
+// peer_ip (the wizard's NETPLAY_PEER_IP) is the only address accepted; NULL or "" accepts anyone.
+int GBALink_startHost(const char* game_name, uint32_t game_crc, const char* hotspot_ip, const char* link_mode,
+					  const char* peer_ip);
 int GBALink_stopHostFast(void);
 int GBALink_connectToHost(const char* ip, uint16_t port);
 void GBALink_disconnect(void);
 
 // Status queries
 bool GBALink_isConnected(void);
+// USB Cable lockstep follower (client 1) whose leader sent a transfer within
+// GBALINK_FOLLOWER_BUSY_MS: minarch then paces it by the link, not by vsync.
+#define GBALINK_FOLLOWER_BUSY_MS 250
+bool GBALink_lockstepFollowerBusy(void);
+// Lockstep traffic arrived within GBALINK_LOCKSTEP_BUSY_MS (either role):
+// minarch runs the CPU at Performance meanwhile, since the governor would
+// otherwise clock down while gpSP waits for the peer.
+#define GBALINK_LOCKSTEP_BUSY_MS 2000
+bool GBALink_lockstepBusy(void);
+// gpSP's real link cable (lockstep) is in use this session.
+bool GBALink_lockstepLinkInUse(void);
+// The link has no pause: while our menu is open, tell the peer's gpSP to wait
+// for us (hold) instead of reading "no partner" (the game's link error).
+void GBALink_holdLink(bool hold);
+// Any GBA link mode (wireless adapter too): while our menu is open the peer's
+// minarch stops running its game (GBALink_peerPaused) so neither side times
+// out. Also sends GBALink_holdLink. A pause outlasting the cap is ignored.
+#define GBALINK_PEER_PAUSE_MAX_MS 30000 // Leave prompt grace (20 s) + 10 s
+void GBALink_setPaused(bool paused);
+bool GBALink_peerPaused(void);
 
 // Host discovery (for client)
 void GBALink_stopDiscovery(void);

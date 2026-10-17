@@ -1,6 +1,9 @@
 // row_model.c — Carousel/Backdrop geometry (dp) and curves. SDL-free.
 #include "row_model.h"
 #include <math.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 
 #define ROW_HIDE_D 4.0f // items at d >= 4 are hidden; they fade over 3..4
 #define ROW_EPS 1e-4f
@@ -33,10 +36,16 @@ RowSizes Row_sizes(RowKind k, float body_w, float body_h) {
 		s.item_h = h, s.item_w = h * 170.0f / 150.0f, s.gap = 28 * f;
 		break;
 	}
-	case ROW_BACKDROP_LOGO: // the main-menu Consoles' logo slot: side logos shrink further, so the selected one stands out
-		// (415 x 164, about 26% over the spec's 330 x 130 for the handhelds; sides at 0.40 of it)
-		s.item_w = 415 * f, s.item_h = 164 * f, s.scale = 0.40f, s.gap = 28 * f;
+	case ROW_BACKDROP_LOGO: { // the main-menu Consoles' logo slot: side logos shrink further, so the selected one stands
+		// out (460 x 182, about 40% over the spec's 330 x 130 for the handhelds; sides at 0.40 of it, 48 apart). Sized by
+		// the screen alone: no 1.0 cap on the factor, so in px it is the same at every UI scale (rowview.c skips its
+		// big-UI shrink for it too). Held by the body's height at 500 too: a 16:9 screen's extra width (the Smart Pro
+		// S) would otherwise make it bigger than on the Brick for about the same height; the Brick stays width-bound.
+		float fl = minf(body_w / 960.0f, body_h / 500.0f);
+		s.f = fl;
+		s.item_w = 460 * fl, s.item_h = 182 * fl, s.scale = 0.40f, s.gap = 48 * fl;
 		break;
+	}
 	case ROW_BACKDROP_TOOL: // 1.6x the spec's 150 wide (long names) and 1.3x its 160 tall, its icon and name 1.3x
 		s.item_w = 240 * f, s.item_h = 208 * f, s.gap = 14 * f;
 		break;
@@ -78,6 +87,33 @@ RowItem Row_item(const RowSizes* s, RowKind k, float index, float pos) {
 			it.alpha *= 1 - (1 - ROW_LOGO_SIDE_ALPHA) * t;
 	}
 	return it;
+}
+
+// Item i's centre (dp from the row centre) with the selection resting on k: the selection full size, the others at
+// s->scale, s->gap between neighbouring edges.
+static float restDx(const RowSizes* s, int k, int i, float (*w)(int, void*), void* ctx) {
+	if (i == k)
+		return 0;
+	int dir = i > k ? 1 : -1;
+	float x = w(k, ctx) / 2 + s->gap;
+	for (int j = k + dir; j != i; j += dir)
+		x += w(j, ctx) * s->scale + s->gap;
+	x += w(i, ctx) * s->scale / 2;
+	return dir * x;
+}
+
+float Row_itemDxVar(const RowSizes* s, float index, float pos, int n, float (*w)(int, void*), void* ctx) {
+	int i = (int)floorf(index + 0.5f);
+	if (n <= 1 || i < 0 || i >= n) // one item (or none): it follows pos, as Row_item's
+		return (index - pos) * ((n == 1 ? w(0, ctx) : s->item_w) * s->scale + s->gap);
+	// linear between the two rests either side of pos (beyond the ends: on along the end pair's line)
+	int k0 = (int)floorf(pos);
+	if (k0 < 0)
+		k0 = 0;
+	if (k0 > n - 2)
+		k0 = n - 2;
+	float f = pos - k0;
+	return (1 - f) * restDx(s, k0, i, w, ctx) + f * restDx(s, k0 + 1, i, w, ctx);
 }
 
 float Row_slotAlpha(float d) {
@@ -226,4 +262,45 @@ void Row_boxBlurAlpha(unsigned char* a, unsigned char* tmp, int w, int h, int r,
 		for (int x = 0; x < w; x++) // vertical: tmp → a
 			box_line(tmp + x, a + x, h, w, r);
 	}
+}
+
+int Row_collBreakFit(const char* name, char lines[2][256], int (*measure)(const char*, void*), void* ctx, int max_w) {
+	lines[0][0] = lines[1][0] = '\0';
+	int n = 0;
+	const char* p = name ? name : "";
+	while (*p) {
+		while (*p == ' ')
+			p++;
+		if (!*p)
+			break;
+		const char* e = p;
+		while (*e && *e != ' ')
+			e++;
+		int len = (int)(e - p);
+		if (n == 0)
+			n = 1;
+		else if (n == 1 && lines[0][0]) {
+			int cps = 0; // the word's characters (code points: a UTF-8 continuation byte isn't one)
+			for (const char* c = p; c < e; c++)
+				cps += ((unsigned char)*c & 0xC0) != 0x80;
+			bool wrap = cps > 5;				 // a long word starts the second line
+			if (!wrap && measure && max_w > 0) { // so does a word the first line has no room for
+				char cand[512];
+				snprintf(cand, sizeof(cand), "%s %.*s", lines[0], len, p);
+				wrap = measure(cand, ctx) > max_w;
+			}
+			if (wrap)
+				n = 2;
+		}
+		char* l = lines[n - 1];
+		size_t used = strlen(l);
+		if (used + (used ? 1 : 0) + (size_t)len < 256) {
+			if (used)
+				l[used++] = ' ';
+			memcpy(l + used, p, (size_t)len);
+			l[used + len] = '\0';
+		}
+		p = e;
+	}
+	return n;
 }

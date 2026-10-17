@@ -17,6 +17,7 @@ CORES+= mednafen_vb
 CORES+= mednafen_wswan
 CORES+= mgba
 CORES+= pcsx_rearmed
+CORES+= swanstation
 CORES+= pet
 CORES+= picodrive
 CORES+= genesis_plus_gx
@@ -29,7 +30,9 @@ CORES+= prboom
 CORES+= bluemsx
 CORES+= gearcoleco
 CORES+= flycast
+CORES+= flycast_legacy
 CORES+= ppsspp
+CORES+= mupen64plus_next
 
 ###############################
 
@@ -41,10 +44,13 @@ CORES+= ppsspp
 # *_MAKEFILE=
 # *_BUILD_PATH=
 # *_SUBMODULES=
+# *_LICENSE=
+# *_LICENSE_NOTICE=
 
 a2600_REPO = https://github.com/libretro/stella2014-libretro
 a2600_CORE = stella2014_libretro.so
 a2600_HASH = 3cc89f0d316d6c924a5e3f4011d17421df58e615
+a2600_LICENSE = stella/license.txt
 
 a5200_CORE = a5200_libretro.so
 a5200_HASH = 526404072821bb2021fab16f8c5dbbca300512c8
@@ -55,12 +61,15 @@ a7800_HASH = acae250da8d98b8b9707cd499e2a0bf6d8500652
 
 handy_REPO = https://github.com/libretro/libretro-handy
 handy_HASH = fca239207e9c111da3e85d2faf0b1b9d7524e498
+handy_LICENSE = lynx/license.txt
 
 fbneo_REPO = https://github.com/libretro/FBNeo
 fbneo_CORE = fbneo_libretro.so
 fbneo_BUILD_PATH = fbneo/src/burner/libretro
 fbneo_MAKE = make
 fbneo_HASH = 6a5cc250c2db8d874a06ee86e302a2a78918b4c1
+# the root LICENSE.md only links to this
+fbneo_LICENSE = src/license.txt
 
 mednafen_pce_fast_REPO = https://github.com/libretro/beetle-pce-fast-libretro
 mednafen_pce_fast_HASH = 52675734da114a19b3705f03906b1455f3d76644
@@ -79,25 +88,45 @@ fake-08_BUILD_PATH = fake-08/platform/libretro
 fake-08_HASH = f6bab5a7ba521ce440e45d1aeef6122674be6ee9
 
 fceumm_REPO = https://github.com/libretro/libretro-fceumm
-fceumm_HASH = 5cd4a43e16a7f3cd35628d481c347a0a98cfdfa2
+fceumm_HASH = 236ccdfc911e84c60fea6b9d0699c2d440a8de14
 
 gambatte_REPO = https://github.com/libretro/gambatte-libretro
-gambatte_HASH = 9fe223d9c4b615c55840170c6e85e6e9fa4bd1d2
+gambatte_HASH = d9d6cd06382d1ced30de34d56d3609452323dab1
 
 # Pinned: upstream gpsp rfu.c drifts (rfu_reset/new_devid reworked) and breaks
 # the all/cores/patches/gpsp/* netplay patches. When bumping this hash, regen
 # 001-rfu_disconnect_fix.patch against the new source in the same change.
 gpsp_HASH = 2db57b11a437c4432ab69823bdcd951181de6213
+# The lockstep link state machine (shared with mGBA) is compiled in from
+# all/cores/sio_lockstep (004 patch); NX_SIOLS_DIR points the patched Makefile at it.
+gpsp_FLAGS = NX_SIOLS_DIR=$(CURDIR)/../../all/cores/sio_lockstep
+gpsp_DEPS = $(wildcard ../../all/cores/sio_lockstep/*.c ../../all/cores/sio_lockstep/*.h)
 
 mednafen_supafaust_REPO = https://github.com/libretro/supafaust
 mednafen_supafaust_HASH = e25f66765938d33f9ad5850e8d6cd597e55b7299
 
-mgba_HASH = c758314a639aa0066e7b65a8341448181b73c804
+mgba_HASH = 7a12d6d4b9acb14c0ae62c9166b6a2f3d08007f6
+# Upstream builds the libretro core with CMake only (8940477), via a build script
+# like flycast/ppsspp. The real link cable (all/cores/patches/mgba/001) compiles in
+# the same lockstep state machine as gpSP; NX_SIOLS_DIR points the patched
+# CMakeLists.txt at it.
+mgba_MAKE = NX_SIOLS_DIR=$(CURDIR)/../../all/cores/sio_lockstep sh $(CURDIR)/../../all/cores/mgba/build-libretro.sh $(PLATFORM)
+mgba_DEPS = ../../all/cores/mgba/build-libretro.sh ../../all/cores/flycast/toolchain-aarch64.cmake $(wildcard ../../all/cores/sio_lockstep/*.c ../../all/cores/sio_lockstep/*.h ../../all/cores/patches/mgba/*.patch)
+# That code is GPL-2.0-or-later, so the shipped license says the combined core is
+# distributed under the GPL (MPL-2.0 section 3.3).
+mgba_LICENSE_NOTICE = ../../all/cores/mgba/LICENSE-sio_lockstep.txt
 
 pcsx_rearmed_MAKEFILE = Makefile.libretro
 pcsx_rearmed_HASH = 6eb679d064a1efe92af79fe9970c0591c8da02d4
 # pcsx has a disabled submodule for gnulib, which takes forever to check out and is unused - skip checkout
 pcsx_rearmed_SUBMODULES = frontend/libpicofe
+
+# SwanStation (PSX.pak): libretro's DuckStation fork, a more accurate PlayStation
+# core than pcsx_rearmed with a GLES hardware renderer. Its Makefile.libretro only
+# knows host platforms, so build as unix and name the CPU (the docker host is
+# x86_64); the shared patch strips the .so.
+swanstation_HASH = dd4805619bbbfc6e0d1776372cb16377088b448e
+swanstation_MAKE = make -f Makefile.libretro platform=unix CPU_ARCH=aarch64
 
 picodrive_REPO = https://github.com/irixxxx/picodrive
 picodrive_MAKEFILE = Makefile.libretro
@@ -128,11 +157,12 @@ race_HASH = 171950ea64c96ead503340ed60fa7ba18f56325c
 
 snes9x2005_plus_REPO = https://github.com/libretro/snes9x2005
 snes9x2005_plus_FLAGS = USE_BLARGG_APU=1
+snes9x2005_plus_LICENSE = copyright
 
 snes9x_REPO = https://github.com/libretro/snes9x
 snes9x_CORE = snes9x_libretro.so
 snes9x_BUILD_PATH = snes9x/libretro
-snes9x_HASH = 5a40cd5514e63e691e39141d64267798357a1424
+snes9x_HASH = fae2fea08f74180759ef540ee94259213f503480
 
 libretro-uae_REPO = https://github.com/libretro/libretro-uae
 libretro-uae_BRANCH = 2.6.1
@@ -142,6 +172,7 @@ libretro-uae_HASH = 2826e67ac623974f3b8ab15951f2f8407d81fc17
 libretro-cap32_REPO = https://github.com/libretro/libretro-cap32
 libretro-cap32_CORE = cap32_libretro.so
 libretro-cap32_HASH = 54eabbb210a6149496b1d023bebddb3f0120bc33
+libretro-cap32_LICENSE = cap32/COPYING.txt
 
 c64_REPO  = https://github.com/libretro/vice-libretro
 c64_CORE  = vice_x64_libretro.so
@@ -198,5 +229,34 @@ ppsspp_REPO = https://github.com/hrydgard/ppsspp
 ppsspp_HASH = 2a1700a7ee495310c52c85f9436652cc8f26e45e
 ppsspp_MAKE = NX_CORES_OUTPUT=$(CURDIR)/$(OUTPUT_ROOT) sh $(CURDIR)/../../all/cores/ppsspp/build-libretro.sh $(PLATFORM)
 ppsspp_DEPS = ../../all/cores/ppsspp/build-libretro.sh ../../all/cores/ppsspp/outline_atomics.c ../../all/cores/flycast/toolchain-aarch64.cmake
+
+# flycast_legacy (DCX, "Dreamcast Lite"): libretro's own fork of flycast as of
+# 2022-04-06 (4c293f30; diverged from upstream in 2015), the build CrossMix-OS
+# ships. On the Brick it runs heavy games at full speed where upstream 2.7 does
+# ~80 %. Built with the fork's libretro Makefile (platform=arm64: GLES, arm64
+# dynarec); TARGET_NAME keeps it from colliding with DC's flycast_libretro.so.
+# No OpenMP (only texture upscaling uses it, which DCX leaves off). CC_AS: the
+# arm64 dynarec stub (ngen_arm64.S) needs the C preprocessor, so gcc assembles it.
+flycast_legacy_REPO = https://github.com/libretro/flycast
+flycast_legacy_HASH = 4c293f306bc16a265c2d768af5d0cea138426054
+# tg5050's toolchain has no KHR/khrplatform.h (its GLES2 headers include it):
+# the Khronos header is vendored in all/cores/flycast_legacy/include. Its
+# libGLESv2 is a stub whose symbols live in libmali, so link that too (the
+# fork links with --no-undefined).
+flycast_legacy_MAKE = CPATH=$(CURDIR)/../../all/cores/flycast_legacy/include make platform=arm64 ARCH=aarch64 TARGET_NAME=flycast_legacy HAVE_OPENMP=0 CC_AS="$(CC)" GL_LIB="-lGLESv2 -lmali"
+
+# mupen64plus-next (N64.pak): GLES3, GLideN64 + new aarch64 dynarec, core
+# netplay (patch 0002, our m64p-server) and the Rice video plugin built in
+# (patch 0003 + build-rice.sh) for the PowerVR devices.
+mupen64plus_next_REPO = https://github.com/libretro/mupen64plus-libretro-nx
+mupen64plus_next_HASH = 12edd2c74a517ff86dfa8cfc71ad75e4c10486d5
+# No real submodules, but a stray gitlink (paraLLEl RSP's lightning/gnulib, no
+# .gitmodules) breaks the template's default recursive init; a plain-file
+# pathspec makes init/update a no-op.
+mupen64plus_next_SUBMODULES = -- README.md
+# core licence + the built-in Rice plugin's (written by build-libretro.sh)
+mupen64plus_next_LICENSE = NX-LICENSES.txt
+mupen64plus_next_MAKE = sh $(CURDIR)/../../all/cores/mupen64plus_next/build-libretro.sh $(PLATFORM)
+mupen64plus_next_DEPS = ../../all/cores/mupen64plus_next/build-libretro.sh ../../all/cores/mupen64plus_next/build-rice.sh $(wildcard ../../all/cores/mupen64plus_next/rice/*) $(wildcard ../../all/cores/mupen64plus_next/rice/patches/*.patch) $(wildcard ../../all/cores/mupen64plus_next/nx/*)
 
 include ../../all/cores/Makefile

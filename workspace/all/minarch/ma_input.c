@@ -8,6 +8,7 @@
 #include "ma_config.h"
 #include "netplay_helper.h"
 #include "ma_turbo.h"
+#include "ma_present.h"
 #include "button_layout.h"
 
 int setFastForward(int enable) {
@@ -21,6 +22,7 @@ static TurboState turbo;
 static int ignore_menu = 0;
 static int polled_this_frame = 0;
 int input_positional_faces = 0;
+int input_stick_dpad = 1;
 
 // A binding's button as read for a positional pak: the logical button that
 // the pad's layout swap turns the bound physical position into (see
@@ -81,6 +83,7 @@ void input_poll_callback(void) {
 		newScreenshot = 1;
 		Netplay_quitAll();
 		quit = 1;
+		Present_stop(); // the save state reads the frame back
 		Menu_saveState();
 		if (prefixMatch(SDCARD_PATH, game.path))
 			putFile(GAME_SWITCHER_PERSIST_PATH, game.path + strlen(SDCARD_PATH));
@@ -272,7 +275,7 @@ void input_poll_callback(void) {
 			continue; // present buttons can still be unbound
 		if (input_positional_faces)
 			btn = Input_positionalBtn(btn);
-		if (gamepad_type == 0) {
+		if (gamepad_type == 0 && input_stick_dpad) {
 			switch (btn) {
 			case BTN_DPAD_UP:
 				btn = BTN_UP;
@@ -315,21 +318,11 @@ int16_t input_state_callback(unsigned port, unsigned device, unsigned index, uns
 			return player_buttons;
 		return (player_buttons >> id) & 1;
 	}
-	// Analog inputs (local only - no netplay analog support)
-	else if (port == 0 && device == RETRO_DEVICE_ANALOG) {
-		if (!Netplay_isActive() || Netplay_getMode() == NETPLAY_HOST) {
-			if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT) {
-				if (id == RETRO_DEVICE_ID_ANALOG_X)
-					return pad.laxis.x;
-				else if (id == RETRO_DEVICE_ID_ANALOG_Y)
-					return pad.laxis.y;
-			} else if (index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) {
-				if (id == RETRO_DEVICE_ID_ANALOG_X)
-					return pad.raxis.x;
-				else if (id == RETRO_DEVICE_ID_ANALOG_Y)
-					return pad.raxis.y;
-			}
-		}
+	// Analog sticks: our pad on port 0, or both players' synchronized sticks in netplay
+	else if (device == RETRO_DEVICE_ANALOG) {
+		const PAD_Axis* stick = index == RETRO_DEVICE_INDEX_ANALOG_LEFT ? &pad.laxis : &pad.raxis;
+		int16_t local = (int16_t)(id == RETRO_DEVICE_ID_ANALOG_X ? stick->x : stick->y);
+		return Netplay_getPlayerAnalog(port, index, id, local);
 	}
 	return 0;
 }

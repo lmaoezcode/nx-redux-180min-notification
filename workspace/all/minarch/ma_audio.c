@@ -16,18 +16,40 @@ void audio_sample_callback(int16_t left, int16_t right) {
 		}
 	}
 }
+// NX_AUDIO_BLOCK=1 (set by a pak's launch.sh): for cores that run emulation
+// on their own thread and expect the frontend to block their audio push, as
+// RetroArch's audio sync does (DCX.pak's old flycast). The push waits until
+// the buffer is at most half full: 1 ms steps, at most 100 ms per call so a
+// stalled device can't hang the core, and never while fast-forwarding.
+// With the core's threaded rendering turned off, it pushes audio from
+// retro_run on minarch's main thread instead, so the wait pauses that thread:
+// plain audio sync, which paces that mode correctly too.
+static int audio_block = -1;
+static void waitForAudioRoom(void) {
+	if (audio_block < 0)
+		audio_block = getenv("NX_AUDIO_BLOCK") && atoi(getenv("NX_AUDIO_BLOCK")) == 1;
+	if (!audio_block || fast_forward)
+		return;
+	for (int i = 0; i < 100 && SND_bufferOccupancy() > 0.5f; i++)
+		usleep(1000);
+}
 size_t audio_sample_batch_callback(const int16_t* data, size_t frames) {
+	waitForAudioRoom();
 	EmuTime_countAudio(frames);
 	if (rewinding && !rewind_ctx.audio)
 		return frames;
+	// Always report every input frame as consumed, as RetroArch does: the SND_*
+	// helpers return how many RESAMPLED frames they queued (0 when dropping),
+	// and a core that loops until its batch is consumed (mupen64plus-next:
+	// "output_frames -= ret") spins forever on 0 or wraps its size_t counter
+	// when the 44.1->48 kHz resample returns more frames than it was given.
 	if (!fast_forward || ff_audio) {
-		if (use_core_fps || fast_forward) {
-			return SND_batchSamples_fixed_rate((const SND_Frame*)data, frames);
-		} else {
-			return SND_batchSamples((const SND_Frame*)data, frames);
-		}
-	} else
-		return frames;
+		if (use_core_fps || fast_forward)
+			SND_batchSamples_fixed_rate((const SND_Frame*)data, frames);
+		else
+			SND_batchSamples((const SND_Frame*)data, frames);
+	}
+	return frames;
 }
 
 // We need to do this on the audio thread (aka main thread currently)

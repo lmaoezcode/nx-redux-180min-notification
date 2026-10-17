@@ -3,6 +3,9 @@
 #include "ma_hwrender.h"
 #include "ma_emutime.h"
 #include "netplay_helper.h" // Multiplayer_isActive
+#include "ma_present.h"
+#include "ma_core_progress.h"
+#include "ma_menu.h"
 
 static const char* bitmap_font[] = {
 	['0'] =
@@ -759,11 +762,11 @@ static void drawDebugHud(const void* data, unsigned width, unsigned height, size
 // fast-forward throttle can drop frames *before* the pixel conversion
 static uint32_t last_flip_time = 0;
 
-// 10 seems to be the sweet spot that allows 2x in NES and SNES and 8x in GB at 60fps
-// 14 will let GB hit 10x but NES and SNES will drop to 1.5x at 30fps (not sure why)
-// but 10 hurts PS...
-// TODO: 10 was based on rg35xx, probably different results on other supported platforms
-#define FF_FRAME_INTERVAL_MS 10
+// Shortest gap between presented frames while fast-forwarding. Each present
+// waits for vblank (tg5040 can't turn the swap interval off), so a 10 ms gap
+// let fceumm (~5.4 ms a frame) run only two frames per vblank: 2x at any Max FF
+// Speed. 30 ms shows FF at ~30 fps and leaves the rest of the time to the core.
+#define FF_FRAME_INTERVAL_MS 30
 
 static void video_refresh_callback_main(const void* data, unsigned width, unsigned height, size_t pitch) {
 	// return;
@@ -788,6 +791,7 @@ static void video_refresh_callback_main(const void* data, unsigned width, unsign
 	// if source has changed size (or forced by dst_p==0)
 	// eg. true src + cropped src + fixed dst + cropped dst
 	if (renderer.dst_p == 0 || width != renderer.true_w || height != renderer.true_h) {
+		Present_stop(); // GFX_clearAll and the shader reset need the GL context here
 		selectScaler(width, height, pitch);
 		GFX_clearAll();
 		if (!shader_reset_suppressed) {
@@ -808,6 +812,11 @@ static void video_refresh_callback_main(const void* data, unsigned width, unsign
 
 	renderer.src = (void*)data;
 	renderer.dst = screen->pixels;
+	if (Present_update()) { // busy USB link follower: the present thread swaps
+		Present_submit(&renderer);
+		last_flip_time = SDL_GetTicks();
+		return;
+	}
 	GFX_blitRenderer(&renderer);
 
 	screen_flip(screen);
@@ -1082,6 +1091,32 @@ void video_refresh_callback(const void* data, unsigned width, unsigned height, s
 	// pixel conversion and ambient scan for frames that will never be shown
 	if (fast_forward && SDL_GetTicks() - last_flip_time < FF_FRAME_INTERVAL_MS)
 		return;
+
+	// A core reporting progress (a hi-res texture pack converted on first
+	// launch) shows that instead of its picture; afterwards the screen goes
+	// back to the game's size and the scaler is rebuilt on the next frame.
+	{
+		static int progress_shown = 0;
+		static int restore_w, restore_h, restore_p;
+		char title[128], detail[256];
+		if (CoreProgress_active(title, sizeof(title), detail, sizeof(detail))) {
+			if (!progress_shown) {
+				progress_shown = 1;
+				restore_w = screen->w;
+				restore_h = screen->h;
+				restore_p = screen->pitch;
+			}
+			Menu_progressNotice(title, detail);
+			return;
+		}
+		if (progress_shown) {
+			progress_shown = 0;
+			if (screen->w != restore_w || screen->h != restore_h)
+				screen = GFX_resize(restore_w, restore_h, restore_p);
+			GFX_clear(screen);
+			renderer.dst_p = 0;
+		}
+	}
 
 	if (HWR_active()) {
 		video_refresh_hw(data, width, height);

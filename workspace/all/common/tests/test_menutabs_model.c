@@ -182,9 +182,36 @@ static void clamp_window_cases(void) {
 	sel = 9, start = 5, end = 11;
 	MenuTabs_clampWindow(20, 6, &sel, &start, &end);
 	assert(sel == 9 && start == 5 && end == 11);
-	// list shrank under the window: back to the top, as buildRoot always did
+	// list shrank under the window, the selection still in it: the row is kept, the window slides back
 	sel = 9, start = 5, end = 11;
 	MenuTabs_clampWindow(10, 6, &sel, &start, &end);
+	assert(sel == 9 && start == 4 && end == 10);
+	// Home with 8 pins on the last one, a pin removed elsewhere: still on row 7 (now the last)
+	sel = 7, start = 2, end = 8;
+	MenuTabs_clampWindow(8, 6, &sel, &start, &end);
+	assert(sel == 7 && start == 2 && end == 8);
+	sel = 6, start = 2, end = 8;
+	MenuTabs_clampWindow(7, 6, &sel, &start, &end);
+	assert(sel == 6 && start == 1 && end == 7);
+	// list shrank past the selection: back to the top, as buildRoot always did
+	sel = 9, start = 5, end = 11;
+	MenuTabs_clampWindow(8, 6, &sel, &start, &end);
+	assert(sel == 0 && start == 0 && end == 6);
+	// a window that starts below the selection: rebuilt from the selection's row
+	sel = 3, start = 5, end = 11;
+	MenuTabs_clampWindow(20, 6, &sel, &start, &end);
+	assert(sel == 3 && start == 3 && end == 9);
+	// a window that ends before the selection: rebuilt to end on it
+	sel = 12, start = 2, end = 8;
+	MenuTabs_clampWindow(20, 6, &sel, &start, &end);
+	assert(sel == 12 && start == 7 && end == 13);
+	// a negative start: rebuilt from the selection
+	sel = 1, start = -2, end = 4;
+	MenuTabs_clampWindow(20, 6, &sel, &start, &end);
+	assert(sel == 1 && start == 1 && end == 7);
+	// a negative selection: the top
+	sel = -1, start = 0, end = 6;
+	MenuTabs_clampWindow(20, 6, &sel, &start, &end);
 	assert(sel == 0 && start == 0 && end == 6);
 	// rows grew: same first row, a longer window
 	sel = 9, start = 5, end = 11;
@@ -206,6 +233,20 @@ static void clamp_window_cases(void) {
 	sel = 2, start = 0, end = 0;
 	MenuTabs_clampWindow(4, 6, &sel, &start, &end);
 	assert(sel == 2 && start == 0 && end == 4);
+}
+
+static void under_path_needs_a_boundary(void) {
+	assert(MenuTabs_underPath("/mnt/SDCARD/Roms", "/mnt/SDCARD/Roms"));
+	assert(MenuTabs_underPath("/mnt/SDCARD/Roms/GBA/x.gba", "/mnt/SDCARD/Roms"));
+	assert(!MenuTabs_underPath("/mnt/SDCARD/Roms2/x.gba", "/mnt/SDCARD/Roms"));
+	assert(!MenuTabs_underPath("/mnt/SDCARD/Collections2/a.txt", "/mnt/SDCARD/Collections"));
+	assert(!MenuTabs_underPath("/mnt/SDCARD/Rom", "/mnt/SDCARD/Roms"));
+	// a base with its trailing slash: the slash is the boundary
+	assert(MenuTabs_underPath("/mnt/SDCARD/.system/paks/Tools/A.pak", "/mnt/SDCARD/.system/paks/Tools/"));
+	assert(!MenuTabs_underPath("/mnt/SDCARD/.system/paks/Tools", "/mnt/SDCARD/.system/paks/Tools/"));
+	assert(!MenuTabs_underPath("/mnt/SDCARD/Roms", ""));
+	assert(!MenuTabs_underPath("/mnt/SDCARD/Roms", NULL));
+	assert(!MenuTabs_underPath(NULL, "/mnt/SDCARD"));
 }
 
 static void slots_park_take_round_trip(void) {
@@ -276,6 +317,35 @@ static void reload_plan_recents_marks_no_tab(void) {
 	assert(p.stale_tabs == 0);
 }
 
+static void home_hidden_drops_the_tab(void) {
+	MenuTabId t[MENU_TAB_COUNT];
+	MenuTabInputs in = all_on();
+	in.hide_home = true;
+	assert(MenuTabs_visible(&in, t) == 3);
+	assert(t[0] == MENU_TAB_CONSOLES && t[1] == MENU_TAB_COLLECTIONS && t[2] == MENU_TAB_TOOLS);
+	in.show_consoles = false;
+	assert(MenuTabs_visible(&in, t) == 2 && t[0] == MENU_TAB_COLLECTIONS);
+}
+
+static void home_hidden_but_nothing_else_keeps_home(void) {
+	MenuTabId t[MENU_TAB_COUNT];
+	MenuTabInputs in = {.hide_home = true}; // every other tab hidden or empty: Home is the last resort
+	assert(MenuTabs_visible(&in, t) == 1 && t[0] == MENU_TAB_HOME);
+	in.show_tools = true; // Tools shown but empty
+	assert(MenuTabs_visible(&in, t) == 1 && t[0] == MENU_TAB_HOME);
+}
+
+static void pick_initial_without_home_opens_first_tab(void) {
+	MenuTabId no_home[3] = {MENU_TAB_CONSOLES, MENU_TAB_COLLECTIONS, MENU_TAB_TOOLS};
+	// cold boot, a saved Home tab, or a Home-owned path: the first visible tab
+	assert(MenuTabs_pickInitial(no_home, 3, false, MENU_TAB_HOME, false, MENU_TAB_HOME, false) == MENU_TAB_CONSOLES);
+	assert(MenuTabs_pickInitial(no_home, 3, true, MENU_TAB_HOME, true, MENU_TAB_HOME, true) == MENU_TAB_CONSOLES);
+	// a visible saved tab still wins
+	assert(MenuTabs_pickInitial(no_home, 3, true, MENU_TAB_TOOLS, false, MENU_TAB_HOME, false) == MENU_TAB_TOOLS);
+	MenuTabId only_tools[1] = {MENU_TAB_TOOLS};
+	assert(MenuTabs_pickInitial(only_tools, 1, false, MENU_TAB_HOME, false, MENU_TAB_HOME, false) == MENU_TAB_TOOLS);
+}
+
 int main(void) {
 	visible_fixed_order_and_toggles();
 	home_always_first_and_visible();
@@ -292,6 +362,7 @@ int main(void) {
 	cold_boot_opens_home();
 	home_launch_owns_path();
 	clamp_window_cases();
+	under_path_needs_a_boundary();
 	slots_park_take_round_trip();
 	slots_park_full_returns_old();
 	slots_drop_keeps_hint();
@@ -299,6 +370,9 @@ int main(void) {
 	reload_plan_pins_marks_only_home();
 	reload_plan_collections_bit();
 	reload_plan_recents_marks_no_tab();
+	home_hidden_drops_the_tab();
+	home_hidden_but_nothing_else_keeps_home();
+	pick_initial_without_home_opens_first_tab();
 	printf("test_menutabs_model: ok\n");
 	return 0;
 }

@@ -6,10 +6,13 @@
 #include "ma_input.h"
 #include "ma_config.h"
 #include "ma_options.h"
+#include "ma_runframe.h"
 #include "ma_opts_dump.h"
 #include "ra_integration.h"
+#include "ma_core_progress.h"
 #include "core_netplay.h"
 #include "gbalink.h"
+#include "gbalink_mode.h"
 
 static bool set_rumble_state(unsigned port, enum retro_rumble_effect effect, uint16_t strength) {
 	(void)port; // single motor, port is not distinguishable
@@ -24,6 +27,29 @@ static bool set_rumble_state(unsigned port, enum retro_rumble_effect effect, uin
 		rumble_weak = strength;
 	VIB_setStrength(rumble_strong > rumble_weak ? rumble_strong : rumble_weak);
 	return 1;
+}
+// libretro's perf interface: a monotonic clock and CPU features for real,
+// profiling hooks as no-ops. Some cores call get_time_usec unconditionally
+// (older flycast does while pausing its emulation thread to save a state)
+static retro_time_t perf_get_time_usec(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (retro_time_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+static uint64_t perf_get_cpu_features(void) {
+#if defined(__aarch64__) || defined(__ARM_NEON)
+	return RETRO_SIMD_NEON;
+#else
+	return 0;
+#endif
+}
+static retro_perf_tick_t perf_get_counter(void) {
+	return (retro_perf_tick_t)perf_get_time_usec();
+}
+static void perf_noop(struct retro_perf_counter* counter) {
+	(void)counter;
+}
+static void perf_log_noop(void) {
 }
 bool environment_callback(unsigned cmd, void* data) { // copied from picoarch initially
 
@@ -48,6 +74,19 @@ bool environment_callback(unsigned cmd, void* data) { // copied from picoarch in
 		if (message)
 			LOG_info("%s\n", message->msg);
 		break;
+	}
+	case RETRO_ENVIRONMENT_SET_MESSAGE_EXT: { /* 60 */
+		// Progress (e.g. mupen64plus-next converting a hi-res texture pack on
+		// first launch) is shown as a notice page; other messages are logged,
+		// as plain SET_MESSAGE ones are.
+		const struct retro_message_ext* message = (const struct retro_message_ext*)data;
+		if (message && message->msg) {
+			if (message->type == RETRO_MESSAGE_TYPE_PROGRESS)
+				CoreProgress_set(message->msg);
+			else
+				LOG_info("%s\n", message->msg);
+		}
+		return true;
 	}
 	case RETRO_ENVIRONMENT_SHUTDOWN: { /* 7 */
 		// A core's own quit path (e.g. Doom's quit menu, FBNeo's error screen)
@@ -109,7 +148,10 @@ bool environment_callback(unsigned cmd, void* data) { // copied from picoarch in
 		struct retro_variable* var = (struct retro_variable*)data;
 		if (var && var->key) {
 			var->value = OptionList_getOptionValue(&config.core, var->key);
-			// printf("\t%s = \"%s\"\n", var->key, var->value);
+			var->value = FF_coreOptionValue(var->key, var->value);
+			// gpsp_serial: Automatic means real link cable in a USB Cable
+			// session, and "lockstep" exists only there (gbalink_mode.c).
+			var->value = gbalink_serial_option(var->key, var->value, getenv("NETPLAY_MODE"));
 		}
 		// fflush(stdout);
 		break;
@@ -143,6 +185,22 @@ bool environment_callback(unsigned cmd, void* data) { // copied from picoarch in
 		break;
 	}
 	case RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK: { /* 22 */
+		// minarch never calls a core's audio callback, so refuse it: a core
+		// that was told yes waits to be asked for audio and plays silence
+		// (older flycast builds), while a refused one pushes samples itself
+		return false;
+	}
+	case RETRO_ENVIRONMENT_GET_PERF_INTERFACE: { /* 28 */
+		struct retro_perf_callback* cb = (struct retro_perf_callback*)data;
+		if (!cb)
+			return false;
+		cb->get_time_usec = perf_get_time_usec;
+		cb->get_cpu_features = perf_get_cpu_features;
+		cb->get_perf_counter = perf_get_counter;
+		cb->perf_register = perf_noop;
+		cb->perf_start = perf_noop;
+		cb->perf_stop = perf_noop;
+		cb->perf_log = perf_log_noop;
 		break;
 	}
 	case RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE: { /* 23 */
@@ -176,7 +234,12 @@ bool environment_callback(unsigned cmd, void* data) { // copied from picoarch in
 			const struct retro_controller_info* info = &infos[0];
 			for (int i = 0; i < info->num_types; i++) {
 				const struct retro_controller_description* type = &info->types[i];
-				if (exactMatch((char*)type->desc, "dualshock")) { // currently only enabled for PlayStation
+				// currently only enabled for PlayStation: pcsx_rearmed names it
+				// "dualshock" (517), SwanStation "Analog Controller (DualShock)" (261)
+				if (type->desc && containsString((char*)type->desc, "dualshock")) {
+					static char dualshock_id[12];
+					snprintf(dualshock_id, sizeof(dualshock_id), "%u", type->id);
+					gamepad_values[1] = dualshock_id;
 					has_custom_controllers = 1;
 					break;
 				}
@@ -361,10 +424,24 @@ bool environment_callback(unsigned cmd, void* data) { // copied from picoarch in
 	// 	puts("RETRO_ENVIRONMENT_GET_THROTTLE_STATE"); fflush(stdout);
 	// 	break;
 	// }
-	// case RETRO_ENVIRONMENT_GET_FASTFORWARDING: {
-	// 	puts("RETRO_ENVIRONMENT_GET_FASTFORWARDING"); fflush(stdout);
-	// 	break;
-	// };
+	case RETRO_ENVIRONMENT_GET_FASTFORWARDING: { /* 49 */
+		// older threaded flycast builds only pace themselves and push audio
+		// once the frontend answers this
+		bool* out = (bool*)data;
+		if (out)
+			*out = fast_forward != 0;
+		break;
+	}
+	case RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE: {
+		// SPIKE: mupen64plus-next's core netplay asks for fast-forward while
+		// this side lags the lead player (netplay_get_input) and drops it once
+		// caught up; without it a lagging device can never catch up. NULL is
+		// the "is it supported" probe.
+		const struct retro_fastforwarding_override* o = (const struct retro_fastforwarding_override*)data;
+		if (o && CoreNetplay_isActive())
+			fast_forward = setFastForward(o->fastforward);
+		return true;
+	}
 	case RETRO_ENVIRONMENT_SET_HW_RENDER: {
 		return HWR_setCallback((struct retro_hw_render_callback*)data);
 	}

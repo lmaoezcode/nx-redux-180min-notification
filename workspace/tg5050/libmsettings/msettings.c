@@ -406,6 +406,22 @@ void InitSettings(void) {
 
 	SetFanSpeed(settings->fanSpeed);
 }
+// InitSettings without touching the hardware: maps the shared settings as a
+// client and applies nothing (no mixer defaults, no FN-mode re-apply). For a
+// short-lived tool that changes one setting while audio and video are live,
+// e.g. osdctl from the OSD; InitSettings' re-apply briefly runs the codec at
+// full scale (a speaker pop) and resets the backlight (a flash) (issue #164).
+// Falls back to InitSettings when there is no host yet.
+void InitSettingsNoApply(void) {
+	sprintf(SettingsPath, "%s/msettings.bin", getenv("USERDATA_PATH"));
+
+	shm_fd = shm_open(SHM_KEY, O_RDWR, 0644);
+	if (shm_fd == -1) {
+		InitSettings();
+		return;
+	}
+	settings = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+}
 int InitializedSettings(void) {
 	return (settings != NULL);
 }
@@ -1370,3 +1386,41 @@ void SetRawFanSpeed(int val) { // 0-31, -1/-2-3 for auto low/med/high
 		return;
 	}
 }
+
+// Compatibility: the pre-#103 "mute" names of the FN-mode API. Third-party paks built against NextUI's
+// libmsettings (e.g. josegonzalez's minui-presenter, which imports GetMute and GetMuted*) fail to start with
+// "undefined symbol" without them. Same functions under the old names; not declared in msettings.h.
+int GetMute(void) __attribute__((alias("GetFnMode")));
+void SetMute(int) __attribute__((alias("SetFnMode")));
+int GetMutedBrightness(void) __attribute__((alias("GetFnBrightness")));
+void SetMutedBrightness(int) __attribute__((alias("SetFnBrightness")));
+int GetMutedColortemp(void) __attribute__((alias("GetFnColortemp")));
+void SetMutedColortemp(int) __attribute__((alias("SetFnColortemp")));
+int GetMutedContrast(void) __attribute__((alias("GetFnContrast")));
+void SetMutedContrast(int) __attribute__((alias("SetFnContrast")));
+int GetMutedSaturation(void) __attribute__((alias("GetFnSaturation")));
+void SetMutedSaturation(int) __attribute__((alias("SetFnSaturation")));
+int GetMutedExposure(void) __attribute__((alias("GetFnExposure")));
+void SetMutedExposure(int) __attribute__((alias("SetFnExposure")));
+int GetMutedVolume(void) __attribute__((alias("GetFnVolume")));
+void SetMutedVolume(int) __attribute__((alias("SetFnVolume")));
+int GetMuteDisablesDpad(void) __attribute__((alias("GetFnDpadDisabled")));
+void SetMuteDisablesDpad(int) __attribute__((alias("SetFnDpadDisabled")));
+int GetMuteEmulatesJoystick(void) __attribute__((alias("GetFnDpadJoystick")));
+void SetMuteEmulatesJoystick(int) __attribute__((alias("SetFnDpadJoystick")));
+int GetMuteTurboA(void) __attribute__((alias("GetFnTurboA")));
+void SetMuteTurboA(int) __attribute__((alias("SetFnTurboA")));
+int GetMuteTurboB(void) __attribute__((alias("GetFnTurboB")));
+void SetMuteTurboB(int) __attribute__((alias("SetFnTurboB")));
+int GetMuteTurboX(void) __attribute__((alias("GetFnTurboX")));
+void SetMuteTurboX(int) __attribute__((alias("SetFnTurboX")));
+int GetMuteTurboY(void) __attribute__((alias("GetFnTurboY")));
+void SetMuteTurboY(int) __attribute__((alias("SetFnTurboY")));
+int GetMuteTurboL1(void) __attribute__((alias("GetFnTurboL1")));
+void SetMuteTurboL1(int) __attribute__((alias("SetFnTurboL1")));
+int GetMuteTurboL2(void) __attribute__((alias("GetFnTurboL2")));
+void SetMuteTurboL2(int) __attribute__((alias("SetFnTurboL2")));
+int GetMuteTurboR1(void) __attribute__((alias("GetFnTurboR1")));
+void SetMuteTurboR1(int) __attribute__((alias("SetFnTurboR1")));
+int GetMuteTurboR2(void) __attribute__((alias("GetFnTurboR2")));
+void SetMuteTurboR2(int) __attribute__((alias("SetFnTurboR2")));

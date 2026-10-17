@@ -15,6 +15,7 @@
 #include "api.h"
 #include "config.h"
 #include "defines.h"
+#include "ui_text_sizes.h"
 #include "ui_ease.h"
 #include "ui_accent.h"
 #include "ui_message.h"
@@ -33,11 +34,16 @@
 #include "list_window.h"
 #include "menulogo.h"
 #include "menutabs.h"
+#include "rowview.h"		// RowView_beginSprites (the frame drew GPU sprites)
 #include "rowview_shared.h" // the tile kinds, and view_common.h
+#include "ui_contextmenu.h"
+#include "artloader.h"
+#include "menuart.h" // MenuArt_has
 #include "tiles.h"
 #include "types.h"
 #include "ui_fade.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +54,7 @@
 #define CUT_SHADE_ALPHA 179		  // black at 70% over a column cut by a screen edge
 #define EDGE_FADE_SHARE 0.20f	  // the edge fade's width, of the screen's
 #define PREFETCH_TWEEN_SHARE 0.6f // a single move's slide and crossfade this far through let prefetch run
-#define GRID_BIG_UI_SHRINK 0.85f  // the main menu's tiles at the Large UI scale (computeLayout)
+#define GRID_ROOT_SHRINK 0.85f	  // the main menu's tiles (computeLayout)
 
 // the slide: the content offset (dp) eases from `off_from` to `off_to`
 static float off_from = 0, off_to = 0;
@@ -63,6 +69,11 @@ static unsigned seen_top = 0; // the Directory serial (0 = none)
 static unsigned seen_gen = 0;
 static int seen_n = -1;
 static int seen_screen_w = 0, seen_scale = 0;
+
+// FIXED_SCALE in hundredths: a key that tells 2.25 from 2.5 (an (int) cast truncates both to 2)
+static int scaleKey(void) {
+	return (int)lroundf(FIXED_SCALE * 100.0f);
+}
 
 
 ///////////////////////////////////////
@@ -90,25 +101,24 @@ static void computeLayout(SDL_Surface* screen, int n, GridLayout* g) {
 	float pd = pxPerDp();
 	float sw = screen->w / pd, sh = screen->h / pd;
 	// wider tiles than the spec shape: the Consoles and Collections tabs twice as wide (wide logos 4-8:1, long names),
-	// game lists 1.5x (their screenshots), the Tools tab as specced
-	bool root = stack->count == 1;
-	MenuTabId tab = MenuTabs_current();
-	float mul = !root ? 1.5f : (tab == MENU_TAB_TOOLS ? 1.0f : 2.0f);
-	// at the Large UI scale (3x, the Brick's default too): the main menu's tiles (and their logos, icons and names) at
-	// GRID_BIG_UI_SHRINK, else they take most of the smaller body
-	float size = root && FIXED_SCALE >= 3 ? GRID_BIG_UI_SHRINK : 1.0f;
-	// the gap between tiles stays the default scale's px whatever the UI scale
-	GridLayout_computeSized(sw, BAR_DP, sh - 2 * BAR_DP, n, mul, (float)NATIVE_SCALE / (float)FIXED_SCALE, size, g);
+	// game lists 1.5x (their screenshots), the Tools tab per device (ui_text_sizes.h GRID_TOOLS_W_K)
+	int tab = GameList_lookTab(); // the root tab, or a hidden tab's list pushed over it (-1: a game list)
+	bool root = tab >= 0;
+	float tools_k = TextPx_for(GRID_TOOLS_W_K, UIScale_deviceIndex(UI_DEVICE_NAME));
+	float mul = !root ? 1.5f : (tab == MENU_TAB_TOOLS ? tools_k : 2.0f);
+	// the main menu's tiles (and their logos, icons and names) at GRID_ROOT_SHRINK, else they take most of the body
+	float size = root ? GRID_ROOT_SHRINK : 1.0f;
+	GridLayout_computeSized(sw, BAR_DP, sh - 2 * BAR_DP, n, mul, 1.0f, size, g);
 }
 
 ///////////////////////////////////////
 // Tiles (their kinds: rowview.c's per-list cache, RowView_syncKinds / RowView_kindFor)
 
 // The count-only info (time, "n of m") of a game tile. Requests it when it isn't ready (latest request wins: call
-// it for the tile that matters most last).
+// it for the tile that matters most last). None with Layouts > Extra info hidden: the name alone.
 static int gameInfo(Entry* e, InfoSeg segs[3]) {
 	GameInfo info;
-	if (!GameInfo_get(e->path, &info) || !(info.has_time || info.has_ra))
+	if (!CFG_getExtraInfo() || !GameInfo_get(e->path, &info) || !(info.has_time || info.has_ra))
 		return 0;
 	return GameInfo_segments(time(NULL), info.has_time ? info.last_played : 0, info.has_time ? info.seconds : -1,
 							 info.has_ra ? info.unlocked : 0, info.has_ra ? info.total : 0,
@@ -119,7 +129,7 @@ static int gameInfo(Entry* e, InfoSeg segs[3]) {
 // collection's count is requested when it isn't known (latest request wins: call it for the selection last).
 static void tileCount(int i, char* out, size_t size) {
 	out[0] = '\0';
-	if (stack->count != 1 || i < 0 || i >= top->entries->count)
+	if (GameList_lookTab() < 0 || i < 0 || i >= top->entries->count)
 		return;
 	Entry* e = top->entries->items[i];
 	TileKind k = RowView_kindFor(i, e);
@@ -132,7 +142,7 @@ static void tileCount(int i, char* out, size_t size) {
 // A console or collection tile's count for its plain look (NULL for other kinds). *asked is set when a collection
 // queued a count, so the caller can re-ask for the selection last (CollCount's queue keeps the latest request).
 static const char* plainCount(int i, char* out, size_t size, bool* asked) {
-	if (stack->count != 1 || i < 0 || i >= top->entries->count)
+	if (GameList_lookTab() < 0 || i < 0 || i >= top->entries->count)
 		return NULL;
 	Entry* e = top->entries->items[i];
 	TileKind k = RowView_kindFor(i, e);
@@ -152,12 +162,13 @@ static const char* plainCount(int i, char* out, size_t size, bool* asked) {
 ///////////////////////////////////////
 // The tile cache
 
-#define TILE_CACHE_MAX 28 // a sliding screen's columns (+1 each side) in both rows, and the lit looks around the selection
-#define TILE_RING_DP 3.0f // tiles.c's game ring, outside the tile
+#define TILE_CACHE_MAX 112 // a sliding screen's columns (+1 each side) in both rows, the lit looks around the selection,
+						   // and (a main-menu tab) every tile's plain and lit look, composed while the grid is still
+#define TILE_RING_DP 3.0f  // tiles.c's game ring, outside the tile
 
 typedef struct {
 	bool used, lit;
-	int w, h, scale; // the tile (px, without the ring room) and FIXED_SCALE
+	int w, h, scale; // the tile (px, without the ring room) and scaleKey()
 	char path[MAX_PATH];
 	Uint32 stamp;	// what the tile shows (tileStamp)
 	char count[32]; // the lit look's "N games" when it was composed ("" none or unknown)
@@ -177,6 +188,10 @@ static struct {
 } pf;
 
 // The ring's room around a tile: the 3 dp ring and its anti-aliased edge.
+// GPU sprite mode (the frame's tiles, captions and edge shade drawn by the GPU over a black body, RowView_beginSprites):
+// on for every Grid frame but one under a context menu (it draws over the body on the screen, under the sprites)
+static bool grid_sprites = false;
+
 static int ringRoom(void) {
 	return NX_DPF(TILE_RING_DP) + 1;
 }
@@ -228,11 +243,12 @@ static SDL_Surface* cachedTile(const char* path, int w, int h, const TileSpec* t
 				victim = c;
 			continue;
 		}
-		if (c->lit == lit && c->w == w && c->h == h && c->scale == (int)FIXED_SCALE && strcmp(c->path, path) == 0) {
+		if (c->lit == lit && c->w == w && c->h == h && c->scale == scaleKey() && strcmp(c->path, path) == 0) {
 			if (c->stamp != stamp) {
 				c->stamp = stamp;
 				snprintf(c->count, sizeof(c->count), "%s", lit && t->count ? t->count : "");
 				composeTile(c->surf, w, h, t, lit);
+				PLAT_freeSurfaceTexture(c->surf); // recomposed in place: its texture is stale
 			}
 			c->lru = ++tile_lru;
 			return c->surf;
@@ -244,9 +260,10 @@ static SDL_Surface* cachedTile(const char* path, int w, int h, const TileSpec* t
 		return NULL;
 	int sw = w + 2 * room, sh = h + 2 * room;
 	if (victim->surf && (victim->surf->w != sw || victim->surf->h != sh)) {
-		SDL_FreeSurface(victim->surf);
+		GFX_freeSurfaceAndTexture(victim->surf);
 		victim->surf = NULL;
 	}
+	PLAT_freeSurfaceTexture(victim->surf); // a reused surface gets a new look: its texture is stale
 	if (!victim->surf)
 		victim->surf = SDL_CreateRGBSurfaceWithFormat(0, sw, sh, 32, SDL_PIXELFORMAT_ARGB8888);
 	if (!victim->surf) {
@@ -258,7 +275,7 @@ static SDL_Surface* cachedTile(const char* path, int w, int h, const TileSpec* t
 	victim->lit = lit;
 	victim->w = w;
 	victim->h = h;
-	victim->scale = (int)FIXED_SCALE;
+	victim->scale = scaleKey();
 	snprintf(victim->path, sizeof(victim->path), "%s", path);
 	victim->stamp = stamp;
 	snprintf(victim->count, sizeof(victim->count), "%s", lit && t->count ? t->count : "");
@@ -271,7 +288,7 @@ static SDL_Surface* cachedTile(const char* path, int w, int h, const TileSpec* t
 static const char* litCount(const char* path, int w, int h) {
 	for (int i = 0; i < TILE_CACHE_MAX; i++) {
 		const TileSlot* c = &tile_cache[i];
-		if (c->used && c->lit && c->w == w && c->h == h && c->scale == (int)FIXED_SCALE && c->count[0] &&
+		if (c->used && c->lit && c->w == w && c->h == h && c->scale == scaleKey() && c->count[0] &&
 			strcmp(c->path, path) == 0)
 			return c->count;
 	}
@@ -281,10 +298,33 @@ static const char* litCount(const char* path, int w, int h) {
 static void tileCacheClear(void) {
 	for (int i = 0; i < TILE_CACHE_MAX; i++) {
 		if (tile_cache[i].surf)
-			SDL_FreeSurface(tile_cache[i].surf);
+			GFX_freeSurfaceAndTexture(tile_cache[i].surf);
 	}
 	memset(tile_cache, 0, sizeof(tile_cache));
 	tile_lru = 0;
+}
+
+// What the cache holds while the Grid isn't drawn (up to TILE_CACHE_MAX looks of ~0.45 MB, and a texture each): set by
+// each render, released by tileCacheRelease.
+static enum { CACHE_EMPTY,
+			  CACHE_SURFACES,
+			  CACHE_TEXTURES } cache_held = CACHE_EMPTY;
+
+// The Grid is no longer drawn: its tiles' textures go (re-uploaded from the looks on the next Grid frame); with the
+// style itself no longer the Grid (not just Home over it, which comes back to the same tiles), the looks go too.
+static void tileCacheRelease(void) {
+	if (cache_held == CACHE_EMPTY)
+		return;
+	if (GameList_currentStyle() != MENU_STYLE_GRID) {
+		tileCacheClear();
+		cache_held = CACHE_EMPTY;
+		return;
+	}
+	if (cache_held == CACHE_TEXTURES) {
+		for (int i = 0; i < TILE_CACHE_MAX; i++)
+			PLAT_freeSurfaceTexture(tile_cache[i].surf);
+		cache_held = CACHE_SURFACES;
+	}
 }
 
 static void fillBlack(SDL_Surface* screen, int x, int y, int w, int h) {
@@ -325,6 +365,91 @@ static void darkenExcept(SDL_Surface* screen, int w, int y, int h, const Uint8* 
 	darkenRun(screen, w, 0, w, ky1, y + h, col_a);
 }
 
+// darkenExcept as GPU sprites: the per-column alphas in a 1-px-tall black strip (re-uploaded each frame: 4 KB), drawn
+// over the same four parts of the body (the strip's columns under the part, stretched down its height)
+static void darkenSprites(SDL_Surface* screen, int w, int y, int h, const Uint8* col_a, const SDL_Rect* keep) {
+	static SDL_Surface* strip;
+	if (!strip || strip->w != w) {
+		GFX_freeSurfaceAndTexture(strip);
+		strip = SDL_CreateRGBSurfaceWithFormat(0, w, 1, 32, SDL_PIXELFORMAT_ARGB8888);
+		if (!strip)
+			return;
+	}
+	Uint32* px = (Uint32*)strip->pixels;
+	for (int x = 0; x < w; x++)
+		px[x] = (Uint32)col_a[x] << 24;
+	bool fresh = strip->userdata == NULL;
+	SDL_Texture* t = PLAT_textureForSurface(strip);
+	if (!t)
+		return;
+	if (!fresh)
+		PLAT_textureRefresh(strip);
+	SDL_Rect clip = {0, y, w, h};
+	SDL_Rect parts[4];
+	int n = 0;
+	int ky0 = keep->y < y ? y : keep->y;
+	int ky1 = keep->y + keep->h > y + h ? y + h : keep->y + keep->h;
+	if (ky1 <= ky0 || keep->x >= w || keep->x + keep->w <= 0) {
+		parts[n++] = (SDL_Rect){0, y, w, h};
+	} else {
+		parts[n++] = (SDL_Rect){0, y, w, ky0 - y};
+		parts[n++] = (SDL_Rect){0, ky0, keep->x, ky1 - ky0};
+		parts[n++] = (SDL_Rect){keep->x + keep->w, ky0, w - keep->x - keep->w, ky1 - ky0};
+		parts[n++] = (SDL_Rect){0, ky1, w, y + h - ky1};
+	}
+	for (int i = 0; i < n; i++) {
+		SDL_Rect d = parts[i];
+		if (d.x < 0)
+			d.w += d.x, d.x = 0;
+		if (d.x + d.w > w)
+			d.w = w - d.x;
+		if (d.w <= 0 || d.h <= 0)
+			continue;
+		PLAT_spriteAdd(t, &(SDL_Rect){d.x, 0, d.w, 1}, &d, 255, &clip);
+	}
+}
+
+// A game tile with a picture, or one still loading it, as GPU sprites, no composed look (a game list is too long to
+// compose ahead): the picture square and the black corner mask rounding it on the black body (loading: just the plain
+// border), the lit ring as it shows around the tile (over the mask: the ring is what fills the corners outside the
+// tile), then the caption. The overlays are made once per tile size (and accent).
+static void drawGameSprites(SDL_Rect r, const TileSpec* t, float lit, const SDL_Rect* clip) {
+	static SDL_Surface *mask, *ring, *border;
+	static SDL_Color ring_c;
+	SDL_Color ac = UI_accent();
+	if (!mask || mask->w != r.w || mask->h != r.h) {
+		GFX_freeSurfaceAndTexture(mask);
+		mask = Tiles_cornerMask(r.w, r.h);
+		GFX_freeSurfaceAndTexture(border);
+		border = Tiles_borderOverlay(r.w, r.h);
+	}
+	int room = ringRoom() - 1; // TILE_RING_DP's px: the ring overlay's margin
+	if (!ring || ring->w != r.w + 2 * room || ring->h != r.h + 2 * room || ring_c.r != ac.r || ring_c.g != ac.g ||
+		ring_c.b != ac.b) {
+		GFX_freeSurfaceAndTexture(ring);
+		ring = Tiles_ringOverlay(r.w, r.h, ac);
+		ring_c = ac;
+	}
+	float dim = MenuTabs_contentAlpha();
+	if (lit > 1.0f)
+		lit = 1.0f;
+	Uint8 full = (Uint8)(255.0f * dim + 0.5f), lit_a = (Uint8)(255.0f * lit * dim + 0.5f);
+	if (t->picture) { // the square picture, rounded by the mask
+		PLAT_spriteAdd(PLAT_textureForSurface(t->picture), NULL, &r, full, clip);
+		if (mask)
+			PLAT_spriteAdd(PLAT_textureForSurface(mask), NULL, &r, full, clip);
+	} else if (border && lit < 1.0f) { // still loading: the black base (the body's own black) and its plain border
+		PLAT_spriteAdd(PLAT_textureForSurface(border), NULL, &r,
+					   (Uint8)(Tiles_borderAlpha() * (1.0f - lit) * dim + 0.5f), clip);
+	}
+	if (ring && lit > 0.0f)
+		PLAT_spriteAdd(PLAT_textureForSurface(ring), NULL,
+					   &(SDL_Rect){r.x - room, r.y - room, r.w + 2 * room, r.h + 2 * room}, lit_a, clip);
+	SDL_Surface* cap = lit > 0.0f ? Tiles_captionSurface(r, t, lit) : NULL;
+	if (cap)
+		PLAT_spriteAdd(PLAT_textureForSurface(cap), NULL, &r, lit_a, clip);
+}
+
 // One tile at its px rect r: a copy of the cached look, or for a crossfade lit over plain in one pass, then the lit
 // caption over it. Returns whether it painted its whole rect with the ring room (opaque); off screen it paints
 // nothing.
@@ -334,8 +459,28 @@ static bool drawTile(SDL_Surface* screen, const char* path, SDL_Rect r, const Ti
 	const SDL_Rect* clip = &screen->clip_rect;
 	if (x >= clip->x + clip->w || x + sw <= clip->x || y >= clip->y + clip->h || y + sh <= clip->y)
 		return false;
+	// a game's picture, or a game tile still loading one (an empty title tile): sprites, no composed look
+	if (grid_sprites && ((t->kind == TILE_GAME && t->picture) || (t->kind == TILE_TITLE && !t->name))) {
+		drawGameSprites(r, t, lit, clip);
+		return true;
+	}
 	SDL_Surface* plain = lit < 1.0f ? cachedTile(path, r.w, r.h, t, false) : NULL;
 	SDL_Surface* lit_s = lit > 0.0f ? cachedTile(path, r.w, r.h, t, true) : NULL;
+	if (grid_sprites) { // the GPU: plain, the lit look over it at the crossfade, the caption over that (tab-focus dim)
+		float dim = MenuTabs_contentAlpha();
+		Uint8 full = (Uint8)(255.0f * dim + 0.5f), lit_a = (Uint8)(255.0f * (lit > 1.0f ? 1.0f : lit) * dim + 0.5f);
+		SDL_Rect where = {x, y, sw, sh};
+		if (!plain && !lit_s)
+			return false; // out of memory: no look to hand the GPU (the body isn't uploaded, so no slow path either)
+		if (plain)
+			PLAT_spriteAdd(PLAT_textureForSurface(plain), NULL, &where, full, clip);
+		if (lit_s)
+			PLAT_spriteAdd(PLAT_textureForSurface(lit_s), NULL, &where, plain ? lit_a : full, clip);
+		SDL_Surface* cap = lit > 0.0f ? Tiles_captionSurface(r, t, lit) : NULL;
+		if (cap)
+			PLAT_spriteAdd(PLAT_textureForSurface(cap), NULL, &r, lit_a, clip);
+		return true;
+	}
 	if ((lit < 1.0f && !plain) || (lit > 0.0f && !lit_s)) {
 		// no memory for the cache: the slow path, on its own black
 		fillBlack(screen, x, y, sw, sh);
@@ -390,6 +535,42 @@ static void tileSpec(int i, int tw, int th, float scale, TileSpec* t, char logo[
 
 ///////////////////////////////////////
 
+// The console logos of the tiles within LOGO_WARM_RADIUS of the selection, decoded on the art loader's thread
+// (nearest first) at the box their tiles fit them in, once per selection, list or size: a tile composed as it slides in
+// then finds its logo decoded instead of decoding it in that frame.
+#define LOGO_WARM_RADIUS 12
+static void warmLogos(int n, int sel, int tw, int th, float scale) {
+	static unsigned seen_serial, seen_gen;
+	static int seen_sel = -1, seen_n, seen_tw, seen_th;
+	if (top->serial == seen_serial && MenuTabs_generation() == seen_gen && sel == seen_sel && n == seen_n &&
+		tw == seen_tw && th == seen_th)
+		return;
+	seen_serial = top->serial, seen_gen = MenuTabs_generation(), seen_sel = sel, seen_n = n, seen_tw = tw;
+	seen_th = th;
+	int bw, bh;
+	Tiles_gridLogoBox(tw, th, scale, &bw, &bh); // as drawLogo decodes them
+	if (bw <= 0 || bh <= 0)
+		return;
+	for (int d = 0; d <= LOGO_WARM_RADIUS; d++) {
+		for (int side = -1; side <= 1; side += 2) {
+			int i = sel + side * d;
+			if (i < 0 || i >= n || (d == 0 && side > 0))
+				continue;
+			Entry* e = top->entries->items[i];
+			if (RowView_kindFor(i, e) != TILE_LOGO)
+				continue;
+			const char* slash = strrchr(e->path, '/');
+			const char* id = MenuLogo_idForFolder(slash ? slash + 1 : e->path);
+			if (!id)
+				continue;
+			char logo[64];
+			snprintf(logo, sizeof(logo), "menu_logo_%s.png", id);
+			if (!MenuArt_has(logo, bw, bh)) // cached already: drawLogo's MenuArt_get would never take the loader's copy
+				ArtLoader_request(logo, bw, bh, d);
+		}
+	}
+}
+
 bool GridView_active(void) {
 	return GameList_currentStyle() == MENU_STYLE_GRID && !Home_active();
 }
@@ -400,14 +581,14 @@ static bool syncList(SDL_Surface* screen, int n, int lastScreen) {
 	// on every frame (a no-op while they're this list's), not only when the Grid's own key changes
 	RowView_syncKinds(n);
 	bool changed = top->serial != seen_top || MenuTabs_generation() != seen_gen || n != seen_n ||
-				   screen->w != seen_screen_w || (int)FIXED_SCALE != seen_scale || lastScreen != SCREEN_GAMELIST;
+				   screen->w != seen_screen_w || scaleKey() != seen_scale || lastScreen != SCREEN_GAMELIST;
 	if (!changed)
 		return false;
 	seen_top = top->serial;
 	seen_gen = MenuTabs_generation();
 	seen_n = n;
 	seen_screen_w = screen->w;
-	seen_scale = (int)FIXED_SCALE;
+	seen_scale = scaleKey();
 	return true;
 }
 
@@ -463,6 +644,7 @@ void GridView_render(SDL_Surface* screen, int lastScreen) {
 	int tw = NX_DPF(g.tile_w), th = NX_DPF(g.tile_h);
 	int row_y[2] = {NX_DPF(g.rows_top), NX_DPF(g.rows_top + g.tile_h + g.gap)};
 	float scale = GridLayout_tileK(&g);
+	warmLogos(n, sel, tw, th, scale);
 
 	// the lit tiles' info first, the selection's last: GameInfo's queue keeps the latest request
 	InfoSeg prev_segs[3], sel_segs[3];
@@ -479,11 +661,17 @@ void GridView_render(SDL_Surface* screen, int lastScreen) {
 	}
 	// the main menu's "N games" on the lit tiles, the selection's last (CollCount's queue keeps the latest request)
 	char prev_count[32] = "", sel_count[32];
-	if (lit_tw.active && lit_prev >= 0 && lit_prev < n)
+	// whenever there is a previous selection, not only while it fades: it keeps that tile's plain look keyed on its
+	// count (an empty one here re-composed the look, and again once the count came back)
+	if (lit_prev >= 0 && lit_prev < n)
 		tileCount(lit_prev, prev_count, sizeof(prev_count));
 	tileCount(sel, sel_count, sizeof(sel_count));
 
-	fillBlack(screen, 0, bar + body_h, screen->w, screen->h - bar - body_h); // under the hint bar's scrim
+	grid_sprites = !ContextMenu_isOpen();
+	cache_held = CACHE_TEXTURES;		// the looks drawn below (and prefetched after) may get textures
+	RowView_beginSprites(grid_sprites); // marks the frame as a sprite frame (the host uploads only the bars)
+	if (!grid_sprites)
+		fillBlack(screen, 0, bar + body_h, screen->w, screen->h - bar - body_h); // under the hint bar's scrim
 	SDL_Rect prev_clip;
 	SDL_GetClipRect(screen, &prev_clip);
 	SDL_SetClipRect(screen, &(SDL_Rect){0, bar, screen->w, body_h});
@@ -514,7 +702,9 @@ void GridView_render(SDL_Surface* screen, int lastScreen) {
 			char plain[32];
 			if (i != sel && i != lit_prev)
 				t.count = plainCount(i, plain, sizeof(plain), &asked);
-			if (drawTile(screen, ((Entry*)top->entries->items[i])->path, (SDL_Rect){x, row_y[row], tw, th}, &t, litAmount(i))) {
+			if (drawTile(screen, ((Entry*)top->entries->items[i])->path, (SDL_Rect){x, row_y[row], tw, th}, &t,
+						 litAmount(i)) &&
+				!grid_sprites) {
 				fillBlack(screen, cursor[row], row_y[row] - room, x - room - cursor[row], th + 2 * room);
 				cursor[row] = x + tw + room;
 			}
@@ -522,13 +712,16 @@ void GridView_render(SDL_Surface* screen, int lastScreen) {
 	}
 	if (asked)
 		tileCount(sel, sel_count, sizeof(sel_count)); // the selection's count stays the latest request
-	// the black between and around the tiles: the bands above, between and under the rows, and each row's gaps
-	int r0 = row_y[0] - room, r0b = row_y[0] + th + room, r1 = row_y[1] - room, r1b = row_y[1] + th + room;
-	fillBlack(screen, 0, bar, screen->w, r0 - bar);
-	fillBlack(screen, 0, r0b, screen->w, r1 - r0b);
-	fillBlack(screen, 0, r1b, screen->w, screen->h - r1b);
-	for (int row = 0; row < 2; row++)
-		fillBlack(screen, cursor[row], row_y[row] - room, screen->w - cursor[row], th + 2 * room);
+	// the black between and around the tiles: the bands above, between and under the rows, and each row's gaps (a
+	// sprite frame's body is the screen's own black)
+	if (!grid_sprites) {
+		int r0 = row_y[0] - room, r0b = row_y[0] + th + room, r1 = row_y[1] - room, r1b = row_y[1] + th + room;
+		fillBlack(screen, 0, bar, screen->w, r0 - bar);
+		fillBlack(screen, 0, r0b, screen->w, r1 - r0b);
+		fillBlack(screen, 0, r1b, screen->w, screen->h - r1b);
+		for (int row = 0; row < 2; row++)
+			fillBlack(screen, cursor[row], row_y[row] - room, screen->w - cursor[row], th + 2 * room);
+	}
 
 	if (g.sliding) {
 		// one darkening pass over the edges: the columns cut by a screen edge under a 70% black layer, and the edge
@@ -557,8 +750,13 @@ void GridView_render(SDL_Surface* screen, int lastScreen) {
 		// the selected tile (ring room included) stays out of the pass: the lit look is never dimmed by an edge
 		int sx = NX_DPF(GridLayout_columnX(&g, sel_col, off)) - room;
 		SDL_Rect lit_r = {sx, row_y[sel_row] - room, tw + 2 * room, th + 2 * room};
-		darkenExcept(screen, w, bar, body_h, col_a, &lit_r);
+		if (grid_sprites)
+			darkenSprites(screen, w, bar, body_h, col_a, &lit_r);
+		else
+			darkenExcept(screen, w, bar, body_h, col_a, &lit_r);
 	}
+	RowView_beginSprites(false);
+	grid_sprites = false;
 
 	SDL_SetClipRect(screen, &prev_clip);
 
@@ -576,6 +774,8 @@ static bool pastDeadline(Uint32 deadline) {
 // Compose ahead what the next move needs, so it starts on cached tiles: the columns just off screen either side at
 // the slide's target (plain) and the selection's neighbours (lit; the caption isn't part of the cached look). Until
 // done or the deadline; true when it stopped with more.
+#define MAIN_MENU_PRECOMPOSE 48 // a main-menu tab this long or shorter has all its plain tiles composed ahead
+
 static bool prefetchTiles(const GridLayout* g, int n, int sel, Uint32 deadline) {
 	int tw = NX_DPF(g->tile_w), th = NX_DPF(g->tile_h);
 	float scale = GridLayout_tileK(g);
@@ -599,7 +799,15 @@ static bool prefetchTiles(const GridLayout* g, int n, int sel, Uint32 deadline) 
 			TileSpec t;
 			tileSpec(i, tw, th, scale, &t, logo);
 			t.count = plainCount(i, plain, sizeof(plain), &asked);
-			cachedTile(((Entry*)top->entries->items[i])->path, tw, th, &t, false);
+			if ((t.kind == TILE_GAME && t.picture) || (t.kind == TILE_TITLE && !t.name)) {
+				// drawn from its picture, or loading one (drawGameSprites): no look to compose
+				if (t.picture)
+					PLAT_textureForSurface(t.picture);
+				continue;
+			}
+			SDL_Surface* s = cachedTile(((Entry*)top->entries->items[i])->path, tw, th, &t, false);
+			if (s) // its texture too, between frames (the Grid draws GPU sprites)
+				PLAT_textureForSurface(s);
 		}
 	}
 	int step = g->sliding ? 2 : g->cols;
@@ -616,17 +824,68 @@ static bool prefetchTiles(const GridLayout* g, int n, int sel, Uint32 deadline) 
 		TileSpec t;
 		tileSpec(i, tw, th, scale, &t, logo);
 		// the lit look carries its count: the move then starts cached. A neighbour whose lit look already shows a
-		// known count reuses it (no CollCount stat each pass); the selection always asks afresh.
+		// known count reuses it (no CollCount stat each pass); the selection always asks afresh. The ±1 neighbours (the
+		// next move's selection, which the render asks afresh too) ask each pass: a count that changed since their look
+		// was composed is recomposed here, not in the move's first frame (a still-unknown one keeps the known count).
 		const char* path = ((Entry*)top->entries->items[i])->path;
 		const char* known = litCount(path, tw, th);
-		if (known) {
+		if (known && k < 2) {
+			tileCount(i, count, sizeof(count));
+			counted = true;
+			if (!count[0])
+				snprintf(count, sizeof(count), "%s", known);
+		} else if (known) {
 			snprintf(count, sizeof(count), "%s", known);
 		} else {
 			tileCount(i, count, sizeof(count));
 			counted = true;
 		}
 		t.count = count;
-		cachedTile(path, tw, th, &t, true);
+		if ((t.kind == TILE_GAME && t.picture) || (t.kind == TILE_TITLE && !t.name)) {
+			if (t.picture)
+				PLAT_textureForSurface(t.picture);
+			continue;
+		}
+		SDL_Surface* s = cachedTile(path, tw, th, &t, true);
+		if (s)
+			PLAT_textureForSurface(s);
+	}
+	// A main-menu tab (a short list): every tile's plain look, then its lit one (with its count), nearest first, while
+	// the grid is still, so a move only ever reuses composed tiles (a compose costs about a frame). A game list is too
+	// long for that: its neighbours only.
+	if (!more && stack->count == 1 && n <= MAIN_MENU_PRECOMPOSE && !slide_tw.active && !lit_tw.active) {
+		for (int lit = 0; lit <= 1 && !more; lit++) {
+			for (int d = 0; d < n && !more; d++) {
+				for (int side = -1; side <= 1 && !more; side += 2) {
+					int i = sel + side * d;
+					if (i < 0 || i >= n || (d == 0 && side > 0)) // the selection too: its plain look is what it fades to
+						continue;
+					if (pastDeadline(deadline)) {
+						more = true;
+						break;
+					}
+					char logo[64], count[32];
+					TileSpec t;
+					tileSpec(i, tw, th, scale, &t, logo);
+					const char* path = ((Entry*)top->entries->items[i])->path;
+					if (lit) {
+						const char* known = litCount(path, tw, th);
+						if (known)
+							snprintf(count, sizeof(count), "%s", known);
+						else {
+							tileCount(i, count, sizeof(count));
+							counted = true;
+						}
+						t.count = count;
+					} else {
+						t.count = plainCount(i, count, sizeof(count), &asked);
+					}
+					SDL_Surface* s = cachedTile(path, tw, th, &t, lit);
+					if (s)
+						PLAT_textureForSurface(s);
+				}
+			}
+		}
 	}
 	if (counted || asked) {
 		char sel_count[32];
@@ -641,7 +900,7 @@ bool GridView_prefetchStep(Uint32 deadline) {
 	// the grid the layout was worked out for is gone (a new list, tab, size or scale not drawn yet, or a moved
 	// selection): nothing until the next render re-arms it
 	if (!GridView_active() || !top || !screen || top->serial != seen_top || MenuTabs_generation() != seen_gen ||
-		top->entries->count != pf.n || screen->w != seen_screen_w || (int)FIXED_SCALE != seen_scale ||
+		top->entries->count != pf.n || screen->w != seen_screen_w || scaleKey() != seen_scale ||
 		View_selectedIndex(pf.n) != pf.sel) {
 		pf.armed = false;
 		return false;
@@ -711,6 +970,15 @@ bool GridView_handleInput(unsigned long now, bool* dirty, bool* switched_tab) {
 	if (m == GRID_MOVE_MOVED) {
 		selectTile(index, n);
 		*dirty = true;
+	} else if ((m == GRID_MOVE_EDGE_PREV || m == GRID_MOVE_EDGE_NEXT) && PAD_justPressed(btn) &&
+			   (stack->count > 1 ? GameList_lookTab() >= 0 : MenuTabs_count() <= 1)) {
+		// no tab to switch to (a hidden tab's list pushed over a tab, or the only tab): a fresh press wraps around the
+		// content; a held key stops
+		int t = GridLayout_wrap(&g, index, m);
+		if (t != index) {
+			selectTile(t, n);
+			*dirty = true;
+		}
 	} else if ((m == GRID_MOVE_EDGE_PREV || m == GRID_MOVE_EDGE_NEXT) && stack->count == 1 && PAD_justPressed(btn)) {
 		// the main menu: past an end, a fresh press switches tab; a held key stops (game lists always stop)
 		unsigned gen = MenuTabs_generation();
@@ -726,6 +994,7 @@ bool GridView_animating(void) {
 		pf.armed = false;
 		slide_tw.active = lit_tw.active = false;
 		off_from = off_to;
+		tileCacheRelease();
 		return false;
 	}
 	bool a = tweenTick(&slide_tw, SLIDE_MS);
@@ -737,5 +1006,6 @@ bool GridView_animating(void) {
 
 void GridView_quit(void) {
 	pf.armed = false;
+	cache_held = CACHE_EMPTY;
 	tileCacheClear(); // the tile kinds are rowview.c's: RowView_quit frees them
 }

@@ -4,6 +4,8 @@
 #include "ma_input.h"
 #include "ma_rewind.h"
 #include "ma_avinfo.h"
+#include "ma_saves.h"
+#include "ma_options.h"
 
 _Static_assert(SYNC_SRC_AUTO == AVSYNC_AUTO && SYNC_SRC_SCREEN == AVSYNC_SCREEN && SYNC_SRC_CORE == AVSYNC_CORE &&
 				   SYNC_SRC_EMULATED == AVSYNC_EMULATED,
@@ -13,26 +15,70 @@ void chooseSyncRef(void) {
 	use_core_fps = SyncRef_useCoreFps(sync_ref, core.get_region() == RETRO_REGION_PAL, core.fps, SCREEN_FPS);
 }
 
-static void limitFF(void) {
-	static uint64_t ff_frame_time = 0;
-	static uint64_t last_time = 0;
-	static int last_max_speed = -1;
-	if (last_max_speed != max_ff_speed) {
-		last_max_speed = max_ff_speed;
-		ff_frame_time = 1000000 / (core.fps * (max_ff_speed + 1));
+// Core options swapped for a cheaper value while fast-forwarding. Only what the
+// core reads changes (FF_coreOptionValue, from GET_VARIABLE): the stored option,
+// the menus and the saved config keep the user's choice.
+static const struct {
+	const char* key;
+	const char* value;
+} ff_core_options[] = {
+	// High costs ~5.4 ms a frame on the Brick against ~2.1 ms for Low, which
+	// alone held fceumm (FC, FDS) to 2x at any Max FF Speed
+	{"fceumm_sndquality", "Low"},
+	{NULL, NULL},
+};
+
+const char* FF_coreOptionValue(const char* key, const char* value) {
+	if (!fast_forward || !key)
+		return value;
+	for (int i = 0; ff_core_options[i].key; i++) {
+		if (!strcmp(key, ff_core_options[i].key))
+			return ff_core_options[i].value;
 	}
+	return value;
+}
+
+// On every fast-forward on/off edge: have the core re-read its options (above)
+// and, when FF audio plays, drop minarch's resampler to Low until FF ends. With
+// FF audio off the samples never reach the resampler, so it is left alone.
+static void syncFFQuality(void) {
+	static int was_ff = 0;
+	static int resampler_lowered = 0;
+	if (fast_forward == was_ff)
+		return;
+	was_ff = fast_forward;
+	for (int i = 0; ff_core_options[i].key; i++) {
+		if (OptionList_getOption(&config.core, ff_core_options[i].key)) {
+			config.core.changed = 1;
+			break;
+		}
+	}
+	if (fast_forward && ff_audio && resampling_quality != 0) {
+		SND_setQuality(0);
+		resampler_lowered = 1;
+	} else if (!fast_forward && resampler_lowered) {
+		SND_setQuality(resampling_quality);
+		resampler_lowered = 0;
+	}
+}
+
+// A fast-forward pass already runs max_ff_speed + 1 core frames (see run_frame),
+// so pacing each pass to one native frame period gives exactly (max_ff_speed + 1)x.
+static void limitFF(void) {
+	static uint64_t last_time = 0;
 
 	uint64_t now = getMicroseconds();
-	if (fast_forward && max_ff_speed) {
+	if (fast_forward && max_ff_speed && core.fps > 0) {
+		uint64_t ff_frame_time = 1000000 / core.fps;
 		if (last_time == 0)
 			last_time = now;
 		int elapsed = now - last_time;
-		if (elapsed > 0 && elapsed < 0x80000) {
+		// running behind by more than a pass: resync instead of bursting to catch up
+		if (elapsed > 0 && elapsed < (int)(ff_frame_time * 2)) {
 			if (elapsed < ff_frame_time) {
 				int delay = (ff_frame_time - elapsed) / 1000;
-				if (delay > 0 && delay < 17) { // don't allow a delay any greater than a frame
+				if (delay > 0)
 					SDL_Delay(delay);
-				}
 			}
 			last_time += ff_frame_time;
 			return;
@@ -42,6 +88,7 @@ static void limitFF(void) {
 }
 
 void run_frame(void) {
+	syncFFQuality();
 	// if rewind is toggled, fast-forward toggle must stay off; fast-forward hold pauses rewind
 	int do_rewind = (rewind_pressed || rewind_toggle) && !(rewind_toggle && ff_hold_active);
 	if (do_rewind) {
@@ -105,4 +152,5 @@ void run_frame(void) {
 		}
 	}
 	limitFF();
+	State_resumePending();
 }

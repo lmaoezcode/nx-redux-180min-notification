@@ -215,6 +215,8 @@ static bool ra_off_cache_relpath(const char* post_data, char* relpath, size_t si
 	return false;
 }
 
+static void ra_off_confirmed_prune(const char* user, const char* session_body);
+
 void RA_Offline_cacheResponse(const char* post_data, const char* body, size_t body_len) {
 	if (!ra_root[0] || !post_data || !body || body_len == 0)
 		return;
@@ -246,6 +248,13 @@ void RA_Offline_cacheResponse(const char* post_data, const char* body, size_t bo
 	}
 
 	ra_off_write_file_atomic(path, body, body_len);
+
+	// a fresh online session lists every unlock the server has for this
+	// game, so confirmed entries it already covers are redundant
+	char r[32], u[64];
+	if (RA_Offline_getParam(post_data, "r", r, sizeof(r)) && strcmp(r, "startsession") == 0 &&
+		RA_Offline_getParam(post_data, "u", u, sizeof(u)))
+		ra_off_confirmed_prune(u, body);
 }
 
 bool RA_Offline_readCacheFile(const char* relpath, char** out_body, size_t* out_len) {
@@ -354,7 +363,7 @@ static bool ra_off_journal_contains_locked(const char* user, uint32_t aid, const
 	bool found = false;
 	while (fgets(line, sizeof(line), f)) {
 		if (ra_off_journal_parse_line(line, &e) &&
-			strcmp(e.username, user) == 0 && e.achievement_id == aid &&
+			strcasecmp(e.username, user) == 0 && e.achievement_id == aid &&
 			strcmp(e.game_hash, hash) == 0) {
 			found = true;
 			break;
@@ -396,7 +405,7 @@ static bool ra_off_confirmed_contains_locked(const char* user, uint32_t aid, con
 	bool found = false;
 	while (fgets(line, sizeof(line), f)) {
 		if (ra_off_journal_parse_line(line, &e) &&
-			strcmp(e.username, user) == 0 && e.achievement_id == aid &&
+			strcasecmp(e.username, user) == 0 && e.achievement_id == aid &&
 			strcmp(e.game_hash, hash) == 0) {
 			found = true;
 			break;
@@ -479,12 +488,13 @@ static int ra_off_journal_entries_for(const char* user, const char* hash,
 	int total = RA_Offline_readJournal(out, max);
 	int kept = 0;
 	for (int i = 0; i < total; i++) {
-		if (strcmp(out[i].username, user) == 0 && strcmp(out[i].game_hash, hash) == 0)
+		if (strcasecmp(out[i].username, user) == 0 && strcmp(out[i].game_hash, hash) == 0)
 			out[kept++] = out[i];
 	}
 	return kept;
 }
 
+// Keeps the newest `max` entries (ring buffer), returned oldest first.
 static int ra_off_read_confirmed(RA_PendingUnlock* out, int max) {
 	if (!ra_root[0] || !out || max <= 0)
 		return 0;
@@ -492,17 +502,31 @@ static int ra_off_read_confirmed(RA_PendingUnlock* out, int max) {
 	char path[RA_OFFLINE_MAX_PATH];
 	ra_off_confirmed_path(path, sizeof(path));
 	FILE* f = fopen(path, "r");
-	int count = 0;
+	long total = 0;
 	if (f) {
 		char line[512];
-		while (count < max && fgets(line, sizeof(line), f)) {
-			if (ra_off_journal_parse_line(line, &out[count]))
-				count++;
+		RA_PendingUnlock e;
+		while (fgets(line, sizeof(line), f)) {
+			if (ra_off_journal_parse_line(line, &e))
+				out[total++ % max] = e;
 		}
 		fclose(f);
 	}
 	pthread_mutex_unlock(&ra_off_mutex);
-	return count;
+	if (total <= max)
+		return (int)total;
+	// wrapped: rotate so the oldest kept entry comes first
+	int head = (int)(total % max);
+	if (head) {
+		RA_PendingUnlock* tmp = (RA_PendingUnlock*)malloc(sizeof(RA_PendingUnlock) * head);
+		if (tmp) {
+			memcpy(tmp, out, sizeof(RA_PendingUnlock) * head);
+			memmove(out, out + head, sizeof(RA_PendingUnlock) * (max - head));
+			memcpy(out + (max - head), tmp, sizeof(RA_PendingUnlock) * head);
+			free(tmp);
+		}
+	}
+	return max;
 }
 
 // confirmed entries for a specific (user, hash) — used by the session merge.
@@ -565,14 +589,29 @@ int RA_Offline_readConfirmed(RA_PendingUnlock* out, int max) {
 	return ra_off_read_confirmed(out, max);
 }
 
+// Filters while reading, so `max` bounds this game's matches rather than the
+// whole file: an old file past `max` lines must not hide newer entries.
+// NULL user matches any user.
 static int ra_off_confirmed_entries_for(const char* user, const char* hash,
 										RA_PendingUnlock* out, int max) {
-	int total = ra_off_read_confirmed(out, max);
+	if (!ra_root[0] || !hash || !out || max <= 0)
+		return 0;
+	pthread_mutex_lock(&ra_off_mutex);
+	char path[RA_OFFLINE_MAX_PATH];
+	ra_off_confirmed_path(path, sizeof(path));
+	FILE* f = fopen(path, "r");
 	int kept = 0;
-	for (int i = 0; i < total; i++) {
-		if (strcmp(out[i].username, user) == 0 && strcmp(out[i].game_hash, hash) == 0)
-			out[kept++] = out[i];
+	if (f) {
+		char line[512];
+		while (kept < max && fgets(line, sizeof(line), f)) {
+			if (ra_off_journal_parse_line(line, &out[kept]) &&
+				(!user || strcasecmp(out[kept].username, user) == 0) &&
+				strcmp(out[kept].game_hash, hash) == 0)
+				kept++;
+		}
+		fclose(f);
 	}
+	pthread_mutex_unlock(&ra_off_mutex);
 	return kept;
 }
 
@@ -618,37 +657,76 @@ static bool ra_off_id_in_body(const char* body, uint32_t id) {
 	return false;
 }
 
-// Build a startsession body: cached server response (if any) with the
-// journal + confirmed unlocks for (user, current game hash) injected into
-// "Unlocks" (see ra_off_id_in_body for the dedup-against-base check).
-static char* ra_off_build_session_body(const char* g, const char* user, size_t* out_len) {
-	char rel[128];
-	snprintf(rel, sizeof(rel), "cache/sessions/%s.json", g);
-	char* cached = NULL;
-	size_t cached_len = 0;
-	RA_Offline_readCacheFile(rel, &cached, &cached_len); // miss is fine
-	if (cached && !ra_off_body_valid(cached)) {
-		free(cached); // corrupt/truncated cache file: treat as cache-miss
-		cached = NULL;
+int RA_Offline_readConfirmedFor(const char* user, const char* hash,
+								RA_PendingUnlock* out, int max) {
+	return ra_off_confirmed_entries_for(user, hash, out, max);
+}
+
+// Drop confirmed entries for `user` whose achievement the server's session
+// body already lists as unlocked (achievement IDs are unique across RA, so
+// no hash/game mapping is needed). Malformed lines are kept verbatim; the
+// rewrite is atomic.
+static void ra_off_confirmed_prune(const char* user, const char* session_body) {
+	if (!ra_root[0] || !user || !*user || !session_body)
+		return;
+	pthread_mutex_lock(&ra_off_mutex);
+	char path[RA_OFFLINE_MAX_PATH], tmp[RA_OFFLINE_MAX_PATH + 8];
+	ra_off_confirmed_path(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE* in = fopen(path, "r");
+	if (!in) {
+		pthread_mutex_unlock(&ra_off_mutex);
+		return;
 	}
+	FILE* out = fopen(tmp, "w");
+	if (!out) {
+		fclose(in);
+		pthread_mutex_unlock(&ra_off_mutex);
+		return;
+	}
+	bool failed = false;
+	int dropped = 0;
+	char line[512];
+	RA_PendingUnlock e;
+	while (fgets(line, sizeof(line), in)) {
+		if (ra_off_journal_parse_line(line, &e) && strcasecmp(e.username, user) == 0 &&
+			ra_off_id_in_body(session_body, e.achievement_id)) {
+			dropped++;
+			continue;
+		}
+		if (fputs(line, out) == EOF) {
+			failed = true;
+			break;
+		}
+	}
+	fclose(in);
+	if (!failed && (fflush(out) != 0 || fsync(fileno(out)) != 0))
+		failed = true;
+	if (fclose(out) != 0)
+		failed = true;
+	if (failed || dropped == 0 || rename(tmp, path) != 0)
+		remove(tmp);
+	pthread_mutex_unlock(&ra_off_mutex);
+}
 
-	static const char* kEmpty = "{\"Success\":true,\"Unlocks\":[],\"HardcoreUnlocks\":[]}";
-	const char* base = cached ? cached : kEmpty;
-	size_t base_len = cached ? cached_len : strlen(kEmpty);
-
+// Copy a startsession body with the journal + confirmed unlocks for
+// (user, hash) injected into "Unlocks" (see ra_off_id_in_body for the
+// dedup-against-base check). *out_added gets the number injected.
+static char* ra_off_merge_unlocks(const char* base, size_t base_len, const char* user,
+								  const char* hash, size_t* out_len, int* out_added) {
 	// journal (not-yet-synced) + confirmed (synced but the cached session
 	// predates the sync) entries for this (user, hash), deduped against each
 	// other and against anything the cached base already lists.
 	RA_PendingUnlock* jentries = NULL;
 	RA_PendingUnlock* centries = NULL;
 	int jn = 0, cn = 0;
-	if (user && *user && ra_current_hash[0]) {
+	if (user && *user && hash && *hash) {
 		jentries = (RA_PendingUnlock*)malloc(sizeof(RA_PendingUnlock) * RA_OFFLINE_MAX_PENDING);
 		centries = (RA_PendingUnlock*)malloc(sizeof(RA_PendingUnlock) * RA_OFFLINE_MAX_PENDING);
 		if (jentries)
-			jn = ra_off_journal_entries_for(user, ra_current_hash, jentries, RA_OFFLINE_MAX_PENDING);
+			jn = ra_off_journal_entries_for(user, hash, jentries, RA_OFFLINE_MAX_PENDING);
 		if (centries)
-			cn = ra_off_confirmed_entries_for(user, ra_current_hash, centries, RA_OFFLINE_MAX_PENDING);
+			cn = ra_off_confirmed_entries_for(user, hash, centries, RA_OFFLINE_MAX_PENDING);
 	}
 
 	size_t ent_cap = (size_t)(jn + cn) * 64 + 1;
@@ -683,15 +761,12 @@ static char* ra_off_build_session_body(const char* g, const char* user, size_t* 
 	}
 	free(jentries);
 	free(centries);
-	if (!ent) {
-		free(cached);
+	if (!ent)
 		return NULL;
-	}
 
 	char* out = (char*)malloc(base_len + ent_len + 32);
 	if (!out) {
 		free(ent);
-		free(cached);
 		return NULL;
 	}
 
@@ -724,9 +799,53 @@ static char* ra_off_build_session_body(const char* g, const char* user, size_t* 
 	}
 	out[len] = '\0';
 	free(ent);
-	free(cached);
 	if (out_len)
 		*out_len = len;
+	if (out_added)
+		*out_added = emitted;
+	return out;
+}
+
+// Build an offline startsession body: the cached server response (if any)
+// with the unlocks for (user, current game hash) merged in.
+static char* ra_off_build_session_body(const char* g, const char* user, size_t* out_len) {
+	char rel[128];
+	snprintf(rel, sizeof(rel), "cache/sessions/%s.json", g);
+	char* cached = NULL;
+	size_t cached_len = 0;
+	RA_Offline_readCacheFile(rel, &cached, &cached_len); // miss is fine
+	if (cached && !ra_off_body_valid(cached)) {
+		free(cached); // corrupt/truncated cache file: treat as cache-miss
+		cached = NULL;
+	}
+
+	static const char* kEmpty = "{\"Success\":true,\"Unlocks\":[],\"HardcoreUnlocks\":[]}";
+	const char* base = cached ? cached : kEmpty;
+	size_t base_len = cached ? cached_len : strlen(kEmpty);
+	char* out = ra_off_merge_unlocks(base, base_len, user, ra_current_hash, out_len, NULL);
+	free(cached);
+	return out;
+}
+
+char* RA_Offline_mergeSession(const char* post_data, const char* body, size_t body_len,
+							  size_t* out_len) {
+	char r[32], u[64], m[64];
+	if (!ra_root[0] || !post_data || !body || !strstr(body, "\"Success\":true") ||
+		!RA_Offline_getParam(post_data, "r", r, sizeof(r)) || strcmp(r, "startsession") != 0 ||
+		!RA_Offline_getParam(post_data, "u", u, sizeof(u)))
+		return NULL;
+	// HTTP worker thread: copy the hash under the lock cacheResponse takes
+	if (!RA_Offline_getParam(post_data, "m", m, sizeof(m)) || !ra_off_safe_component(m)) {
+		pthread_mutex_lock(&ra_off_mutex);
+		snprintf(m, sizeof(m), "%s", ra_current_hash);
+		pthread_mutex_unlock(&ra_off_mutex);
+	}
+	int added = 0;
+	char* out = ra_off_merge_unlocks(body, body_len, u, m, out_len, &added);
+	if (out && added == 0) {
+		free(out);
+		out = NULL;
+	}
 	return out;
 }
 
@@ -818,6 +937,64 @@ bool RA_Offline_handleRequest(const char* post_data, char** out_body,
 						out_body, out_len, out_status);
 }
 
+bool RA_Offline_journalAward(const char* post_data) {
+	char r[32], u[64], a[16], m[64];
+	if (!post_data || !RA_Offline_getParam(post_data, "r", r, sizeof(r)) ||
+		strcmp(r, "awardachievement") != 0)
+		return false;
+	if (!RA_Offline_getParam(post_data, "u", u, sizeof(u)) ||
+		!RA_Offline_getParam(post_data, "a", a, sizeof(a)) ||
+		!RA_Offline_getParam(post_data, "m", m, sizeof(m)) || !ra_off_safe_component(m))
+		return false;
+	uint32_t aid = (uint32_t)strtoul(a, NULL, 10);
+	if (aid == 0 || !u[0])
+		return false;
+	ra_off_journal_append(u, aid, m, time(NULL));
+	return true;
+}
+
+// bounded substring search: response bodies are not guaranteed NUL-terminated
+static bool ra_off_body_has(const char* body, size_t len, const char* needle) {
+	size_t n = strlen(needle);
+	if (!body || n == 0 || len < n)
+		return false;
+	for (size_t i = 0; i + n <= len; i++) {
+		if (body[i] == needle[0] && memcmp(body + i, needle, n) == 0)
+			return true;
+	}
+	return false;
+}
+
+RA_AwardOutcome RA_Offline_classifyAwardResponse(int http_status, const char* body,
+												 size_t body_len) {
+	if (!body || body_len == 0)
+		return RA_AWARD_RETRY;
+	if (http_status == 200 && ra_off_body_has(body, body_len, "\"Success\":true"))
+		return RA_AWARD_ACCEPTED;
+	// "User already has this achievement awarded." (rcheevos treats it as success)
+	if (http_status == 200 && ra_off_body_has(body, body_len, "User already has"))
+		return RA_AWARD_ACCEPTED;
+	if (http_status == 404 && ra_off_body_has(body, body_len, "\"Code\":\"not_found\""))
+		return RA_AWARD_REJECTED;
+	return RA_AWARD_RETRY;
+}
+
+static void ra_off_journal_rewrite(const RA_PendingUnlock* entries, const bool* synced,
+								   int count);
+
+void RA_Offline_removePending(const char* user, uint32_t achievement_id,
+							  const char* game_hash) {
+	if (!ra_root[0] || !user || !*user || achievement_id == 0 || !game_hash || !*game_hash)
+		return;
+	RA_PendingUnlock e;
+	memset(&e, 0, sizeof(e));
+	snprintf(e.username, sizeof(e.username), "%s", user);
+	snprintf(e.game_hash, sizeof(e.game_hash), "%s", game_hash);
+	e.achievement_id = achievement_id;
+	bool drop = true;
+	ra_off_journal_rewrite(&e, &drop, 1);
+}
+
 /*****************************************************************************
  * Sync engine
  *****************************************************************************/
@@ -878,7 +1055,7 @@ static void ra_off_journal_rewrite(const RA_PendingUnlock* entries, const bool* 
 		if (ra_off_journal_parse_line(line, &e)) {
 			for (int i = 0; i < count; i++) {
 				if (synced[i] &&
-					strcmp(entries[i].username, e.username) == 0 &&
+					strcasecmp(entries[i].username, e.username) == 0 &&
 					entries[i].achievement_id == e.achievement_id &&
 					strcmp(entries[i].game_hash, e.game_hash) == 0) {
 					drop = true;
@@ -925,9 +1102,11 @@ int RA_Offline_sync(const char* username, time_t now, RA_SubmitFn submit,
 		return -1;
 	int total = RA_Offline_readJournal(all, RA_OFFLINE_MAX_PENDING);
 
+	// usernames are case-insensitive: entries carry the server's
+	// case-corrected name, callers pass the one typed in Settings (#161)
 	int mine = 0;
 	for (int i = 0; i < total; i++) {
-		if (strcmp(all[i].username, username) == 0)
+		if (strcasecmp(all[i].username, username) == 0)
 			mine++;
 	}
 	if (mine == 0) {
@@ -942,28 +1121,34 @@ int RA_Offline_sync(const char* username, time_t now, RA_SubmitFn submit,
 		return -1;
 	}
 
-	int done = 0, ok = 0;
+	int done = 0, ok = 0, rejected = 0;
 	for (int i = 0; i < total; i++) {
-		if (strcmp(all[i].username, username) != 0)
+		if (strcasecmp(all[i].username, username) != 0)
 			continue;
 		uint32_t secs = (now > all[i].when) ? (uint32_t)(now - all[i].when) : 1;
-		if (submit(&all[i], secs, userdata) == 0) {
+		int rc = submit(&all[i], secs, userdata);
+		if (rc == 0) {
 			synced[i] = true;
 			ok++;
 			// record before the journal rewrite so a cached session that
 			// predates this sync can't re-trigger the achievement offline
 			ra_off_confirmed_append(all[i].username, all[i].achievement_id,
 									all[i].game_hash, all[i].when);
+		} else if (rc == 1) {
+			// rejected for good (achievement removed): stop resubmitting it
+			// forever, but it was never unlocked so it isn't confirmed
+			synced[i] = true;
+			rejected++;
 		}
 		done++;
 		if (progress)
 			progress(done, mine, userdata);
 	}
 
-	if (ok > 0) {
+	if (ok > 0 || rejected > 0)
 		ra_off_journal_rewrite(all, synced, total);
+	if (ok > 0)
 		ra_off_write_lastsync(now);
-	}
 
 	free(synced);
 	free(all);

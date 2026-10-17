@@ -2,6 +2,7 @@
 #define LAUNCHER_H
 
 #include "defines.h"
+#include "menutabs_model.h"
 #include "types.h"
 #include <stdbool.h>
 
@@ -46,7 +47,15 @@ void readyResume(Entry* entry);
 // Bumped by every readyResume call, from any screen: a caller that skips a repeat probe for the same entry
 // compares it to tell whether something else (Search, the switcher, Home) overwrote `resume` since.
 unsigned readyResumeCount(void);
+// The state readyResume would give `entry`, into *out, leaving the shared `resume` and its count as they are: for a
+// look ahead (the Game Switcher List's neighbours' resume frames).
+void readyResumeInto(Entry* entry, ResumeState* out);
 int autoResume(void);
+// Launch Options hand-off (PENDING_LAUNCH_PATH, written by a pak's launch_options.sh on Launch): consume the
+// file and launch its ROM as an A press on it would (Recents, gametime, the list position kept for the return),
+// always fresh (no save state). Returns 1 when a launch was queued (quit set); a missing or stale request (the
+// ROM or its emu pak is gone) is removed and returns 0, so the menu boots as usual. Call after Menu_init.
+int pendingLaunch(void);
 
 // Game launching
 void openPak(char* path);
@@ -60,9 +69,9 @@ void Entry_open(Entry* self);
 // Spawn the Artwork Manager pak's headless fetch for one ROM, fire-and-forget.
 void openArtFetch(const char* rom, const char* out, const char* tag, const char* status);
 
-// Push the Tools list over the current tab (Tools tab hidden) with select_path's row selected (NULL: the first),
-// so B comes back to the tab.
-void pushToolsOverTab(const char* select_path);
+// Push a hidden tab's list (Consoles, Collections or Tools) over the current tab with select_path's row selected
+// (NULL: the first), so B comes back to the tab.
+void pushTabOverTab(MenuTabId id, const char* select_path);
 
 // State persistence
 void saveLast(char* path);
