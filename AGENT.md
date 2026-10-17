@@ -440,7 +440,7 @@ Daemon đếm bằng `CLOCK_MONOTONIC`, chỉ cộng khi không bị tạm dừn
 
 Bất biến: helper lỗi, thiếu, treo hoặc báo sai PID **không bao giờ** được chặn việc mở game (hook trả 0 và dọn helper). Test: `scripts/tests/test-playtime-hook.sh` (hook, chạy cả `busybox sh`), `workspace/all/playtimed/tests/` (đơn vị + daemon). Build/kiểm thử trên Windows: `.dev/CROSS_BUILD_WSL.md`.
 
-Trạng thái minarch trên thẻ (đọc từ G: ngày 2026-10-10): `minarch.elf` là bản **có `client.h` và log chẩn đoán** (828096 byte, ghi 2026-10-10 03:58:18, SHA-256 `C291DA09F838F94D38B0DC01C3161A75551250847608E6C9F20E0CC8213CC6EE`; chứa chuỗi `nx-playtime-inline`, `nx-playtime-due`, `NX_PLAYTIME_PID`, `daily play-time`). Theo mã (commit `2dac4d99`, `457bba48`), khi `playtimed` đang chạy thì minarch tạm dừng bộ đếm theo phiên và chỉ hiện lời nhắc theo ngày do daemon giao, nên lẽ ra chỉ còn **một** lần nhắc. Việc này **chưa xác nhận trên máy**: chưa có log chơi nào sau khi cài bản này (tìm dòng `daily play-time` trong `.userdata/tg5040/logs/<TAG>.txt`). Dựng lại minarch cần toolchain đầy đủ của dự án (Docker, xem `.dev/BUILD.md`).
+Trạng thái minarch trên thẻ (đọc từ G: ngày 2026-10-10): `minarch.elf` là bản **có `client.h` và log chẩn đoán** (828096 byte, ghi 2026-10-10 03:58:18, SHA-256 `C291DA09F838F94D38B0DC01C3161A75551250847608E6C9F20E0CC8213CC6EE`; chứa chuỗi `nx-playtime-inline`, `nx-playtime-due`, `NX_PLAYTIME_PID`, `daily play-time`). Theo mã (commit `2dac4d99`, `457bba48`), khi `playtimed` đang chạy thì minarch tạm dừng bộ đếm theo phiên và chỉ hiện lời nhắc theo ngày do daemon giao, nên lẽ ra chỉ còn **một** lần nhắc. Việc này **chưa kiểm chứng trên máy**: chờ người dùng thử với khoảng nhắc ngắn nhất và báo mỗi mốc hiện 1 hay 2 lần. Log đọc từ G: ngày 2026-10-17 (GBA, PS, FC, FBN, MD) có `helper active=1`, `registered as in-game reminder client`, và trong `MD.txt` mỗi mốc 30/45/60/75 phút có đúng một dòng `showing reminder`; nhưng log minarch chỉ thấy lời nhắc trong game, **không thấy toast hệ thống của daemon**, nên chưa đủ để kết luận không còn nhắc lần hai. Dựng lại minarch cần toolchain đầy đủ của dự án (Docker, xem `.dev/BUILD.md`).
 
 ### 8.1 Khôi phục trên thẻ G ngày 2026-10-03
 
@@ -489,6 +489,12 @@ Luồng chạy port:
 Không dùng `rm -rf` vào đường bind mount của port. Cleanup hiện dùng `umount` rồi `rmdir` để một mount còn sống không thể xóa dữ liệu game thật.
 
 Các tài sản như `main.pak`, `properties/`, dữ liệu thương mại và save là dữ liệu do người dùng cung cấp. Installer/update/repair phải bảo toàn chúng. Ví dụ PvZ Portable cần `main.pak` và `properties/` từ bản GOTY hợp pháp; không coi thư mục rỗng trong gói PortMaster là quyền xóa bản người dùng.
+
+Sự thật về máy và port (ghi 2026-10-17):
+
+- **glibc của firmware là 2.33.** Port đòi glibc cao hơn không chạy được, ví dụ port Unity như Which Sausage, Mate cần 2.38. Thư viện `runtime-glibc` kèm theo một số port (ví dụ `.ports/deadcells/runtime-glibc/`) là cách port tự mang libc, không phải thứ cài vào hệ thống. Giá trị 2.33 do người dùng báo từ máy, chưa kiểm lại trong phiên này.
+- **`PORTS.pak` tự sửa `Ruffle Handheld.sh` ở lần chạy đầu:** đổi shebang `#!/bin/bash` thành `#!/usr/bin/env bash` và các đường dẫn `/storage/roms/ports`, `/roms/ports` thành `/storage/mnt/SDCARD/.ports_temp/ports`, `/mnt/SDCARD/.ports_temp/ports`. Đã đối chiếu: bản repo `Ruffle-Handheld/Ruffle Handheld.sh` là 2295 byte, bản trên thẻ là 2339 byte (SHA-256 `71B31BC8…FB20EC`). Khác repo là hành vi dự kiến, không phải hỏng tệp; đừng chép đè lại bản repo.
+- **Pharos từng hỏng vì `PYSDL2_DLL_PATH` bị ghi đè** trong môi trường PortMaster, đã sửa (theo người dùng; chưa tìm thấy commit tương ứng để dẫn). Launcher hiện đặt `PYSDL2_DLL_PATH="/usr/trimui/lib:/usr/lib"` (`launch.sh`) và `/usr/trimui/lib` (`ports_launch.sh`). Một port hay script không được đặt lại biến này.
 
 Khi debug port:
 
