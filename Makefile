@@ -50,7 +50,11 @@ PACKAGE_URL_MAPPINGS := \
 
 ###########################################################
 
-.PHONY: build
+.PHONY: build check-static-abi
+
+# Highest kernel ABI a static helper may require (Brick Pro runs 4.9.x).
+STATIC_ABI_MAX ?= 3.7.0
+PYTHON3 ?= python3
 
 export MAKEFLAGS=--no-print-directory
 
@@ -456,6 +460,10 @@ setup: name
 	mkdir -p ./workspace/readmes
 	cp ./skeleton/BASE/README.txt ./workspace/readmes/BASE-in.txt
 	
+# Verify static helpers in ./build/SYSTEM do not need a newer kernel than the device.
+check-static-abi:
+	$(PYTHON3) ./scripts/check-static-abi.py --max $(STATIC_ABI_MAX) ./build/SYSTEM
+
 done:
 	# say "done" 2>/dev/null || true
 
@@ -485,6 +493,11 @@ tidy:
 
 package: tidy
 	# ----------------------------------------------------
+	# gate: a static helper built with a newer kernel ABI than the device aborts
+	# with "FATAL: kernel too old" (Docker-built nx_usb_guard.elf, ABI 4.19).
+	# Stops the build before anything is zipped. Same check: make check-static-abi
+	$(PYTHON3) ./scripts/check-static-abi.py --max $(STATIC_ABI_MAX) ./build/SYSTEM
+
 	# zip up build
 
 	# move formatted readmes from workspace to build
