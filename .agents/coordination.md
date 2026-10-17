@@ -36,7 +36,7 @@ chat trước khi ghi hoặc dismount; không chạy các đợt sửa/cài đ�
 cùng volume."
 
 **Thẻ & ROM là session DUY NHẤT lấy khóa thẻ và chép file lên thẻ G.** Các session
-khác (Lõi hệ thống, USB & Tay cầm, Port & Việt hóa, Kết nối) không lấy khóa, không
+khác (Điều phối, Lõi hệ thống, USB & Tay cầm, Port & Việt hóa, Kết nối) không lấy khóa, không
 ghi lên thẻ G, không dismount, không chạy USB Storage/USB Gamepad hay deploy qua
 adb vào thẻ. Chúng chuẩn bị gói triển khai (tệp, đường dẫn đích trên thẻ, SHA-256,
 cách kiểm) và nhờ Thẻ & ROM làm, bằng nhắn giữa các session (mục 4) hoặc ghi vào
@@ -57,7 +57,8 @@ Quy trình của Thẻ & ROM:
 
 | Session | Phạm vi | Nhánh gợi ý |
 |---|---|---|
-| Trợ lý (dự án Claude bên ngoài, không phải session tab Code) | Kế hoạch, prompt, kiểm chứng bên thứ ba; không sửa code, không ghi thẻ | — |
+| Điều phối | Giữ kế hoạch và lộ trình, chọn việc mỗi tuần, nhắn prompt cho các session khác, gom bàn giao (nhật ký `dieu-phoi.md`), kiểm chứng bên thứ ba (log, SHA, Git; thẻ G chỉ đọc); chỉ sửa tài liệu phối hợp trong `.agents/`; không sửa code, không ghi/xóa thẻ | `brickpro/on-v2.0.0` (chỉ `.agents/`) |
+| Trợ lý (dự án Claude bên ngoài, không phải session tab Code) | Chỉ hỏi đáp và tra thông tin cho người dùng; không giữ kế hoạch, không duyệt prompt hay output, không sửa code, không ghi thẻ | — |
 | Thẻ & ROM | ROM, BIOS, artwork, save, cài port lên thẻ, sao lưu thẻ; triển khai tệp lên thẻ G cho các session khác; giữ khóa thẻ duy nhất; không sửa `workspace/` | — |
 | Lõi hệ thống | minarch, nextui, settings, playtimed, merge upstream | `brickpro/core` |
 | USB & Tay cầm | USB Gamepad/NX Controller, USB Storage, MTP, sau này Bluetooth | `brickpro/usb-controller` |
@@ -73,7 +74,7 @@ reset/checkout đè thay đổi chưa commit của session khác.
 Tab Code cho phép một session liệt kê các session khác, đọc chúng đang làm gì và
 nhắn cho chúng. Dùng khi việc của mình ảnh hưởng session khác (ví dụ vừa thay
 binary trên thẻ, vừa merge upstream), và để nhờ Thẻ & ROM triển khai một gói lên
-thẻ G. Vẫn ghi vào file bàn giao để Trợ lý đọc được.
+thẻ G. Vẫn ghi vào file bàn giao để Điều phối đọc được.
 
 ## 5. Bàn giao cuối buổi
 
