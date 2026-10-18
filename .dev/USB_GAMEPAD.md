@@ -17,7 +17,8 @@ tg5040 mapping also cover the Brick and Smart Pro.
    face-button layouts. Press **F2** to switch the LCD backlight off or on.
 5. Hold **MENU + SELECT for 1.5 seconds** to leave controller mode.
 
-The profile targets Windows, Linux, macOS, and Android HID hosts. It is not
+The profile targets Windows, Linux, macOS, and Android HID hosts (Android: see the
+phone section below; untested on hardware). It is not
 XInput and does not implement the authenticated/proprietary protocols needed
 by Xbox, PlayStation, or Nintendo Switch consoles.
 
@@ -82,6 +83,38 @@ controller mode indefinitely.
 `/tmp/stay_awake` keeps the device awake, `keymon.elf` is paused so MENU does
 not open the OSD during the exit chord, and both are restored by the launcher's
 trap.
+
+## Phones and other low-power hosts (power mode)
+
+AOSP ships a key layout for this identity (`Vendor_0f0d_Product_00c1.kl`, "HORIPAD
+for Nintendo Switch"), and it expects exactly the raw button order this profile
+sends, so no separate Android profile is needed. It has **not been confirmed on a
+phone yet**: a Xiaomi 11 Ultra (Android 12, MIUI) showed no controller over either
+USB-C to USB-C or a USB-C to USB-A OTG adapter, while the same phone accepted a
+Flydigi pad. The 18 October log shows two sessions that stayed `not attached` and
+one where the phone began enumerating (`ENABLE`, report-descriptor request of 80
+bytes) and then dropped the bus. The cause is not known; two candidates are the
+port role (both ends dual-role and preferring sink) and the host cutting VBUS
+because the handheld charges from it.
+
+To test those, a one-line file selects a **power mode**:
+
+| `.userdata/<platform>/usb-gamepad-power` | Behaviour |
+|---|---|
+| absent, `pc` or anything else | unchanged: stock charging and port role |
+| `phone` | while the controller runs: charger off, input current at its minimum, port held as USB device; all put back on exit, on error, and by `--restore` after a kill |
+
+The `phone` mode reuses `workspace/all/usblink/usblink_power.c`, which the USB cable
+netplay link uses for the same registers (AXP2202 `0x19`/`0x17` charger, `0xe3`
+USB-C mode); `usbgamepad.elf --power pc|phone` is the switch, and the launcher
+passes it only for `phone`.
+
+Every session also appends power and port samples (twice a second) to
+`.userdata/<platform>/logs/usb-gamepad-power.txt`: `usb_online` (VBUS),
+battery status, UDC state, and in `pc` mode the PMIC registers `0x19 0x17 0xe3
+0xe7` (reg `0xe7` low nibble: 3 attached as device, 6 as host). In `phone` mode
+the binary logs the register changes itself. Host tests:
+`workspace/all/usbgamepad/tests/test_power_mode.c`, `test_launch_power.sh`.
 
 ## HID report
 

@@ -140,6 +140,113 @@ restore_usb_mode() {
 }
 # --- USB mode safety end -----------------------------------------------------
 
+# --- USB power mode begin ----------------------------------------------------
+# Host-tested by workspace/all/usbgamepad/tests/test_launch_power.sh, which
+# extracts exactly this block.
+#
+# .userdata/<platform>/usb-gamepad-power holds `pc` (default: nothing changes) or
+# `phone`: usbgamepad.elf then stops charging from the host, caps the input
+# current and holds the port as a USB device while it runs, and always puts the
+# PMIC back (see gamepad_power.h). Anything else in the file is ignored.
+#
+# A sampler writes the power and port state twice a second to RAM and appends
+# it to usb-gamepad-power.txt when the session ends: VBUS (axp2202-usb online),
+# charger state, UDC state, and, in `pc` mode only, the PMIC registers 0x19 0x17
+# (charger, input limit) and 0xe3 0xe7 (USB-C mode, attach state). In `phone`
+# mode the binary reads those registers itself, and two readers on the one
+# select-then-read debug node would corrupt each other, so the sampler leaves
+# them alone. Nothing here touches the USB role nodes (usb_host, usb_device...).
+POWER_FILE="${USERDATA_PATH:-/mnt/SDCARD/.userdata/tg5040}/usb-gamepad-power"
+POWER_SAMPLES=/tmp/nx_usb_gamepad_power.txt
+POWER_LOG="$LOG_DIR/usb-gamepad-power.txt"
+POWER_MODE=pc
+POWER_ARGS=""
+SAMPLER_PID=""
+SYSFS_ROOT="${NXGP_SYSFS_ROOT:-}" # tests only
+
+usb_power_read_mode() {
+	POWER_MODE=pc
+	POWER_ARGS=""
+	[ -r "$POWER_FILE" ] || return 0
+	power_word=""
+	read -r power_word < "$POWER_FILE" || true
+	case "$(printf '%s' "$power_word" | tr 'A-Z' 'a-z' | tr -d ' \t\r')" in
+		phone)
+			POWER_MODE=phone
+			POWER_ARGS="--power phone"
+			;;
+		pc | "") ;;
+		*) usb_log "ignoring unknown value '$power_word' in $POWER_FILE; using pc" ;;
+	esac
+}
+
+usb_axp_node() {
+	for axp_node in "$SYSFS_ROOT/sys/class/axp/axp_reg" "$SYSFS_ROOT/sys/class/axp/axp2202/axp_reg"; do
+		[ -w "$axp_node" ] || continue
+		echo "$axp_node"
+		return 0
+	done
+	return 1
+}
+
+# One line: $1 = 1 to include the PMIC registers.
+usb_power_sample_once() {
+	read -r sample_up sample_rest < /proc/uptime
+	sample_line="t=$sample_up"
+	sample_line="$sample_line usb_online=$(cat "$SYSFS_ROOT/sys/class/power_supply/axp2202-usb/online" 2>/dev/null)"
+	sample_line="$sample_line batt=$(cat "$SYSFS_ROOT/sys/class/power_supply/axp2202-battery/status" 2>/dev/null)"
+	sample_line="$sample_line cap=$(cat "$SYSFS_ROOT/sys/class/power_supply/axp2202-battery/capacity" 2>/dev/null)"
+	sample_udc=""
+	for sample_state in "$SYSFS_ROOT"/sys/class/udc/*/state; do
+		[ -r "$sample_state" ] && sample_udc="$(cat "$sample_state" 2>/dev/null)"
+	done
+	sample_line="$sample_line udc=$sample_udc"
+	if [ "$1" = 1 ] && sample_node="$(usb_axp_node)"; then
+		for sample_reg in 0x19 0x17 0xe3 0xe7; do
+			printf '%s' "$sample_reg" > "$sample_node" 2>/dev/null
+			sample_line="$sample_line $sample_reg=$(cat "$sample_node" 2>/dev/null | tr -d '\n')"
+		done
+	fi
+	printf '%s\n' "$sample_line"
+}
+
+usb_power_sampler() {
+	sampler_regs=1
+	[ "$POWER_MODE" = pc ] || sampler_regs=0
+	: > "$POWER_SAMPLES"
+	sampler_i=0
+	while [ "$sampler_i" -lt 7200 ]; do
+		usb_power_sample_once "$sampler_regs" >> "$POWER_SAMPLES"
+		sampler_i=$((sampler_i + 1))
+		usleep 500000 2>/dev/null || sleep 1
+	done
+}
+
+usb_power_sampler_start() {
+	usb_power_sampler &
+	SAMPLER_PID=$!
+}
+
+usb_power_sampler_stop() {
+	if [ -n "$SAMPLER_PID" ]; then
+		kill "$SAMPLER_PID" 2>/dev/null
+		wait "$SAMPLER_PID" 2>/dev/null
+		SAMPLER_PID=""
+	fi
+	if [ -s "$POWER_SAMPLES" ]; then
+		{
+			printf '%s\n' "--- session power mode=$POWER_MODE"
+			tail -n 1200 "$POWER_SAMPLES"
+		} >> "$POWER_LOG" 2>/dev/null
+		# Keep the file bounded.
+		if [ "$(wc -l < "$POWER_LOG" 2>/dev/null)" -gt 6000 ] 2>/dev/null; then
+			tail -n 4000 "$POWER_LOG" > "$POWER_LOG.tmp" 2>/dev/null && mv -f "$POWER_LOG.tmp" "$POWER_LOG"
+		fi
+	fi
+	rm -f "$POWER_SAMPLES"
+}
+# --- USB power mode end ------------------------------------------------------
+
 restore_stock_inputd() {
 	if [ -n "$FAST_INPUTD_WATCHDOG_PID" ] && kill -0 "$FAST_INPUTD_WATCHDOG_PID" 2>/dev/null; then
 		kill -TERM "$FAST_INPUTD_WATCHDOG_PID" 2>/dev/null
@@ -246,6 +353,8 @@ cleanup() {
 		kill -9 "$SHOW_PID" 2>/dev/null
 	fi
 
+	usb_power_sampler_stop
+
 	# Normally usbgamepad.elf restores ADB itself. This path catches a crash,
 	# SIGKILL, or a failed early setup and keeps the data port recoverable.
 	if [ -e "$ACTIVE_MARKER" ]; then
@@ -288,6 +397,9 @@ touch /tmp/stay_awake /tmp/hide_osdd
 
 # Cleanup returns USB to the mode recorded by usb_preflight (MTP or ADB).
 usb_enter_gamepad_mode || exit 1
+
+usb_power_read_mode
+usb_log "power mode=$POWER_MODE (set by $POWER_FILE; absent or unreadable = pc)"
 
 INITIAL_LAYOUT=xbox
 if [ -r "$LAYOUT_FILE" ]; then
@@ -346,7 +458,10 @@ show2.elf \
 	--fontsize=28 >> "$LOG_FILE" 2>&1 &
 SHOW_PID=$!
 
-./usbgamepad.elf --profile pc --layout "$INITIAL_LAYOUT" >> "$LOG_FILE" 2>&1
+usb_power_sampler_start
+
+# POWER_ARGS is empty in the default `pc` mode, so that call is unchanged.
+./usbgamepad.elf --profile pc --layout "$INITIAL_LAYOUT" $POWER_ARGS >> "$LOG_FILE" 2>&1
 RESULT=$?
 
 cleanup

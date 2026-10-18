@@ -1,4 +1,8 @@
 #include "gamepad_mapper.h"
+#include "gamepad_power.h"
+// Shared with usblink (workspace/all/usblink): charger, input-current and
+// USB-C role handling for the PMIC; linked in by the Makefile, not copied.
+#include "usblink_power.h"
 
 #include <dirent.h>
 #include <endian.h>
@@ -336,6 +340,37 @@ typedef struct {
 
 static volatile sig_atomic_t running = 1;
 static volatile sig_atomic_t controlTimedOut = 0;
+
+// --power phone: stop charging from the host, cap the input current and hold
+// the port as a USB device while the controller runs. The usblink_power helpers
+// keep the original PMIC values in memory and on disk (/tmp), so `--restore`
+// can undo a run that was killed; each is a no-op on a device without the PMIC
+// debug node. --power pc (the default) never calls any of them.
+static NxGamepadPowerMode powerMode = NXGP_POWER_PC;
+
+static void powerHold(void) {
+	if (powerMode != NXGP_POWER_PHONE)
+		return;
+	// Role first, as usblink does: the port has to come up as the device.
+	if (!usblink_cc_hold_sink())
+		fprintf(stderr, "usbgamepad: USB-C role hold unavailable; left alone\n");
+	if (!usblink_power_limit())
+		fprintf(stderr, "usbgamepad: charger limit unavailable; left alone\n");
+}
+
+static void powerTick(void) {
+	if (powerMode != NXGP_POWER_PHONE)
+		return;
+	usblink_power_check(); // the kernel driver rewrites the input limit on replug
+	usblink_cc_check();	   // and the USB-C mode when VBUS goes away
+}
+
+static void powerRelease(void) {
+	if (powerMode != NXGP_POWER_PHONE)
+		return;
+	usblink_power_restore(); // charger on first, then the original port role
+	usblink_cc_restore();
+}
 
 static void handleSignal(int signalNumber) {
 	(void)signalNumber;
@@ -1358,6 +1393,7 @@ static int bridgeInput(
 	uint64_t automaticExitAt = automaticExitMs ? monotonicMs() + automaticExitMs : 0;
 	uint64_t nextReportAt = monotonicMs();
 	uint64_t nextUdcStateCheckAt = nextReportAt;
+	uint64_t nextPowerCheckAt = nextReportAt + 1000;
 	uint64_t stuckUdcStateSince = 0;
 	char lastUdcState[32] = {0};
 	uint64_t rateWindowStarted = nextReportAt;
@@ -1553,6 +1589,10 @@ static int bridgeInput(
 			}
 			nextUdcStateCheckAt = now + 500;
 		}
+		if (now >= nextPowerCheckAt) {
+			powerTick();
+			nextPowerCheckAt = now + 1000;
+		}
 
 		if (layoutSwitchPending) {
 			if (layoutNeutralSent || !gamepad->enabled) {
@@ -1719,6 +1759,7 @@ static bool parseLayout(const char* value, NxGamepadLayout* layout) {
 static void printUsage(const char* program) {
 	fprintf(stderr,
 		"usage: %s [--profile browser|pc|out-probe] [--layout xbox|nintendo] "
+		"[--power pc|phone] "
 		"[--test-seconds SECONDS] [--probe-functionfs|--probe-functionfs-out|--restore]\n",
 		program);
 }
@@ -1751,6 +1792,16 @@ int main(int argc, char* argv[]) {
 		} else if (strncmp(argv[i], "--layout=", 9) == 0) {
 			if (!parseLayout(argv[i] + 9, &initialLayout)) {
 				fprintf(stderr, "usbgamepad: layout must be 'xbox' or 'nintendo'\n");
+				return 2;
+			}
+		} else if (strcmp(argv[i], "--power") == 0 && i + 1 < argc) {
+			if (!NxGamepadPower_parseMode(argv[++i], &powerMode)) {
+				fprintf(stderr, "usbgamepad: power must be 'pc' or 'phone'\n");
+				return 2;
+			}
+		} else if (strncmp(argv[i], "--power=", 8) == 0) {
+			if (!NxGamepadPower_parseMode(argv[i] + 8, &powerMode)) {
+				fprintf(stderr, "usbgamepad: power must be 'pc' or 'phone'\n");
 				return 2;
 			}
 		} else if (strcmp(argv[i], "--test-seconds") == 0 && i + 1 < argc) {
@@ -1795,6 +1846,10 @@ int main(int argc, char* argv[]) {
 	if (restoreOnly) {
 		restoreScreenFromMarker();
 		(void)writeText(RUMBLE_GPIO, "0\n");
+		// A killed `--power phone` run leaves its originals in /tmp; both calls
+		// do nothing when there is no record, so this is safe for any earlier run.
+		usblink_power_restore_saved();
+		usblink_cc_restore_saved();
 		bool restored = restoreAdb(&gamepad);
 		if (restored)
 			unlink(ACTIVE_MARKER);
@@ -1820,10 +1875,13 @@ int main(int argc, char* argv[]) {
 	restoreScreenFromMarker();
 	(void)writeText(RUMBLE_GPIO, "0\n");
 	createMarker();
+	fprintf(stderr, "usbgamepad: power mode %s\n", NxGamepadPower_modeName(powerMode));
+	powerHold(); // after the marker, so a crash here is repaired by --restore
 	if (!configureGamepad(&gamepad)) {
 		notifyStatus("USB gamepad setup failed");
 		restoreScreenFromMarker();
 		(void)writeText(RUMBLE_GPIO, "0\n");
+		powerRelease();
 		if (restoreAdb(&gamepad))
 			unlink(ACTIVE_MARKER);
 		return 1;
@@ -1856,6 +1914,7 @@ int main(int argc, char* argv[]) {
 	restoreScreenFromMarker();
 	(void)writeText(RUMBLE_GPIO, "0\n");
 	notifyStatus("Restoring USB data mode...");
+	powerRelease();
 	bool restored = restoreAdb(&gamepad);
 	if (restored)
 		unlink(ACTIVE_MARKER);
