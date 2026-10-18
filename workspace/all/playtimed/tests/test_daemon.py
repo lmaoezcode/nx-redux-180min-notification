@@ -188,5 +188,145 @@ class DaemonTests(unittest.TestCase):
         self.stop(child)
         self.assertEqual(len(list(self.shared.iterdir())), 2)
 
+    # ---- hard daily limit -------------------------------------------------
+
+    GAME = ("'/mnt/SDCARD/Emus/GBA.pak/launch.sh' "
+            "'/mnt/SDCARD/Roms/GBA/Game.gba'\n")
+
+    def limit_setup(self, minutes=60, played_ms=0, pin="1234", **extra):
+        lines = (self.shared / "minuisettings.txt").read_text()
+        lines += f"playTimeLimitMinutes={minutes}\n"
+        for key, value in extra.items():
+            lines += f"playTimeLimit{key}={value}\n"
+        (self.shared / "minuisettings.txt").write_text(lines)
+        if pin is not None:
+            (self.shared / "enable-simple-mode").write_text(pin + "\n")
+        self.seed(played_ms)
+        self.next = self.root / "next"
+        self.next.write_text(self.GAME)
+
+    def helper(self, *args):
+        return subprocess.run([BINARY, *args], env=self.env, capture_output=True, text=True,
+                              timeout=10)
+
+    def test_check_blocks_a_game_over_the_limit_but_never_a_tool(self):
+        self.limit_setup(60, played_ms=61 * 60000)
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 3)
+        tool = self.root / "tool"
+        tool.write_text("'/mnt/SDCARD/.system/paks/Tools/Settings.pak/launch.sh' ''\n")
+        self.assertEqual(self.helper("--check", str(tool)).returncode, 0)
+        self.assertEqual(self.helper("--check", str(self.root / "missing")).returncode, 0)
+
+    def test_check_allows_while_time_is_left(self):
+        self.limit_setup(60, played_ms=59 * 60000)
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+
+    def test_limit_needs_simple_mode_with_a_pin_and_fails_open(self):
+        self.limit_setup(60, played_ms=90 * 60000, pin=None)  # no Simple Mode
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+        (self.shared / "enable-simple-mode").write_text("")  # legacy flag, no PIN
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+        (self.shared / "enable-simple-mode").write_text("1234\n")
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 3)
+        self.ledger.write_text("garbage\n")  # unreadable ledger: never lock the device
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+
+    def test_yesterdays_play_time_does_not_count(self):
+        self.limit_setup(60)
+        self.seed(500 * 60000, date="20200101")
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+
+    def test_grant_adds_time_up_to_the_daily_cap_and_status_reports_it(self):
+        self.limit_setup(60, played_ms=61 * 60000, ExtraMinutes=15, ExtraMax=2)
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 3)
+        self.assertEqual(self.helper("--grant").returncode, 0)   # 75 min allowed
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+        status = self.helper("--status").stdout
+        self.assertIn("enabled=1", status)
+        self.assertIn("grants=1", status)
+        self.assertIn("can_grant=1", status)
+        self.assertEqual(self.helper("--grant").returncode, 0)   # 90 min
+        self.assertEqual(self.helper("--grant").returncode, 4)   # cap of 2 reached
+        self.assertIn("can_grant=0", self.helper("--status").stdout)
+        self.assertEqual(self.helper("--grant").returncode, 4)
+        # Customised: unlimited unlocks of 30 minutes each.
+        self.limit_setup(60, played_ms=61 * 60000, ExtraMinutes=30, ExtraMax=0)
+        for _ in range(4):
+            self.assertEqual(self.helper("--grant").returncode, 0)
+        self.assertEqual(self.helper("--grant").returncode, 0)
+        self.assertEqual(self.helper("--check", str(self.next)).returncode, 0)
+
+    def test_grant_without_a_limit_is_refused(self):
+        self.limit_setup(0)
+        self.assertEqual(self.helper("--grant").returncode, 5)
+        self.assertIn("enabled=0", self.helper("--status").stdout)
+
+    def spawn_sleeper(self):
+        child = subprocess.Popen(["sleep", "60"])
+        self.children.append(child)
+        return child
+
+    def test_expired_limit_closes_the_game_but_not_earlier_background_jobs(self):
+        # 3 s of allowance left, 3 s of grace; warn=1 so only the last-minute warning applies.
+        self.limit_setup(1, played_ms=57000, WarnMinutes=1, GraceSeconds=3)
+        background = self.spawn_sleeper()       # existed before the helper: must survive
+        child = self.start()
+        self.ready(child)
+        game = self.spawn_sleeper()             # started after the helper: it is "the game"
+        deadline = time.monotonic() + 14
+        seen = ""
+        while time.monotonic() < deadline and game.poll() is None:
+            if self.toast.exists():
+                seen += self.toast.read_text()
+                self.toast.unlink()
+            time.sleep(0.1)
+        self.assertIsNotNone(game.poll(), "game was not closed when the grace period ended")
+        self.assertIsNone(background.poll(), "a job older than the helper was killed")
+        self.assertIn("1 minute", seen)          # last-minute warning
+        self.assertIn("Closing in", seen)        # time's up notice during the grace period
+        self.stop(child)
+
+    def test_inline_client_is_asked_to_quit_instead_of_being_killed(self):
+        self.limit_setup(1, played_ms=57000, WarnMinutes=1, GraceSeconds=2)
+        (self.runtime / "nx-playtime-inline").write_text(f"{os.getpid()}\n")  # a live "minarch"
+        child = self.start()
+        self.ready(child)
+        game = self.spawn_sleeper()
+        quit_file = self.runtime / "nx-playtime-quit"
+        due = self.runtime / "nx-playtime-due"
+        seen = ""
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline and not quit_file.exists():
+            if due.exists():
+                seen += due.read_text()
+                due.unlink()
+            time.sleep(0.1)
+        self.assertTrue(quit_file.exists(), "no quit request was written")
+        self.assertEqual(quit_file.read_text().strip(), "QUIT")
+        self.assertIsNone(game.poll(), "the game must get time to save and quit by itself")
+        self.assertIn("Closing in", seen)         # reminders go through the inline channel
+        self.assertFalse(self.toast.exists())
+        self.stop(child)
+
+    def test_a_granted_extension_withdraws_the_quit_request(self):
+        self.limit_setup(1, played_ms=57000, WarnMinutes=1, GraceSeconds=2, ExtraMinutes=15)
+        (self.runtime / "nx-playtime-inline").write_text(f"{os.getpid()}\n")
+        child = self.start()
+        self.ready(child)
+        quit_file = self.runtime / "nx-playtime-quit"
+        due = self.runtime / "nx-playtime-due"
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline and not quit_file.exists():
+            if due.exists():
+                due.unlink()
+            time.sleep(0.1)
+        self.assertTrue(quit_file.exists())
+        self.assertEqual(self.helper("--grant").returncode, 0)
+        deadline = time.monotonic() + 20           # the helper re-reads the unlock within 15 s
+        while time.monotonic() < deadline and quit_file.exists():
+            time.sleep(0.2)
+        self.assertFalse(quit_file.exists(), "the quit request stayed after more time was granted")
+        self.stop(child)
+
 
 unittest.main()

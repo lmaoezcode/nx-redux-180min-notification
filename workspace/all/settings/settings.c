@@ -231,6 +231,27 @@ static int playtime_duration_values[] = {3, 5, 10};
 static const char* playtime_duration_labels[] = {"3s", "5s", "10s"};
 #define PLAYTIME_DURATION_COUNT 3
 
+// Hard daily play limit (Simple Mode only; enforced by playtimed)
+static int limit_minutes_values[] = {0, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480};
+static const char* limit_minutes_labels[] = {"Off", "30m", "45m", "1h", "1h 30m", "2h", "2h 30m", "3h", "4h", "5h", "6h", "8h"};
+#define LIMIT_MINUTES_COUNT 12
+
+static int limit_extra_values[] = {5, 10, 15, 20, 30, 45, 60};
+static const char* limit_extra_labels[] = {"5m", "10m", "15m", "20m", "30m", "45m", "1h"};
+#define LIMIT_EXTRA_COUNT 7
+
+static int limit_extra_max_values[] = {0, 1, 2, 3, 5, 10};
+static const char* limit_extra_max_labels[] = {"Unlimited", "1", "2", "3", "5", "10"};
+#define LIMIT_EXTRA_MAX_COUNT 6
+
+static int limit_warn_values[] = {2, 5, 10, 15};
+static const char* limit_warn_labels[] = {"2m", "5m", "10m", "15m"};
+#define LIMIT_WARN_COUNT 4
+
+static int limit_grace_values[] = {0, 60, 180, 300};
+static const char* limit_grace_labels[] = {"At once", "1m", "3m", "5m"};
+#define LIMIT_GRACE_COUNT 4
+
 /* Progress notification duration */
 static int progress_duration_values[] = {0, 1, 2, 3, 4, 5};
 static const char* progress_duration_labels[] = {"Off", "1s", "2s", "3s", "4s", "5s"};
@@ -1441,6 +1462,56 @@ static void reset_playtime_duration(void) {
 	CFG_setPlayTimeNotificationDuration(CFG_DEFAULT_PLAYTIME_NOTIFICATION_DURATION);
 }
 
+static int get_limit_minutes(void) {
+	return CFG_getPlayTimeLimitMinutes();
+}
+static void set_limit_minutes(int v) {
+	CFG_setPlayTimeLimitMinutes(v);
+}
+static void reset_limit_minutes(void) {
+	CFG_setPlayTimeLimitMinutes(CFG_DEFAULT_PLAYTIME_LIMIT_MINUTES);
+}
+
+static int get_limit_extra(void) {
+	return CFG_getPlayTimeLimitExtraMinutes();
+}
+static void set_limit_extra(int v) {
+	CFG_setPlayTimeLimitExtraMinutes(v);
+}
+static void reset_limit_extra(void) {
+	CFG_setPlayTimeLimitExtraMinutes(CFG_DEFAULT_PLAYTIME_LIMIT_EXTRA_MINUTES);
+}
+
+static int get_limit_extra_max(void) {
+	return CFG_getPlayTimeLimitExtraMax();
+}
+static void set_limit_extra_max(int v) {
+	CFG_setPlayTimeLimitExtraMax(v);
+}
+static void reset_limit_extra_max(void) {
+	CFG_setPlayTimeLimitExtraMax(CFG_DEFAULT_PLAYTIME_LIMIT_EXTRA_MAX);
+}
+
+static int get_limit_warn(void) {
+	return CFG_getPlayTimeLimitWarnMinutes();
+}
+static void set_limit_warn(int v) {
+	CFG_setPlayTimeLimitWarnMinutes(v);
+}
+static void reset_limit_warn(void) {
+	CFG_setPlayTimeLimitWarnMinutes(CFG_DEFAULT_PLAYTIME_LIMIT_WARN_MINUTES);
+}
+
+static int get_limit_grace(void) {
+	return CFG_getPlayTimeLimitGraceSeconds();
+}
+static void set_limit_grace(int v) {
+	CFG_setPlayTimeLimitGraceSeconds(v);
+}
+static void reset_limit_grace(void) {
+	CFG_setPlayTimeLimitGraceSeconds(CFG_DEFAULT_PLAYTIME_LIMIT_GRACE_SECONDS);
+}
+
 // ============================================
 // About page static display callbacks
 // ============================================
@@ -1557,7 +1628,7 @@ static void init_about_info(void) {
 #define MAX_NOTIFY_ITEMS 8
 #define MAX_PLAYTIME_ITEMS 5
 #define MAX_ABOUT_ITEMS 8
-#define MAX_SIMPLE_MODE_ITEMS 2
+#define MAX_SIMPLE_MODE_ITEMS 7
 #define MAX_MAIN_ITEMS 16
 
 static SettingItem appearance_items[MAX_APPEARANCE_ITEMS];
@@ -2346,6 +2417,21 @@ static void build_menu_tree(const DeviceInfo* dev) {
 	simple_mode_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
 		"Simple Mode", "Enable simplified menu for children or casual users.",
 		on_off_labels, 2, on_off_values, get_simple_mode, set_simple_mode, reset_simple_mode);
+	simple_mode_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Daily play limit", "Total play time per day across all games. Needs Simple Mode with a PIN. Games close when time is up; the PIN adds time.",
+		limit_minutes_labels, LIMIT_MINUTES_COUNT, limit_minutes_values, get_limit_minutes, set_limit_minutes, reset_limit_minutes);
+	simple_mode_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Time added by PIN", "Minutes one correct PIN adds to today's limit.",
+		limit_extra_labels, LIMIT_EXTRA_COUNT, limit_extra_values, get_limit_extra, set_limit_extra, reset_limit_extra);
+	simple_mode_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"PIN unlocks per day", "How many times a day the PIN can add time.",
+		limit_extra_max_labels, LIMIT_EXTRA_MAX_COUNT, limit_extra_max_values, get_limit_extra_max, set_limit_extra_max, reset_limit_extra_max);
+	simple_mode_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Warn before the end", "First warning before time is up; a last one comes at 1 minute.",
+		limit_warn_labels, LIMIT_WARN_COUNT, limit_warn_values, get_limit_warn, set_limit_warn, reset_limit_warn);
+	simple_mode_items[idx++] = (SettingItem)ITEM_CYCLE_INIT(
+		"Time to save at the end", "Extra play time after the limit, to save, before the game closes.",
+		limit_grace_labels, LIMIT_GRACE_COUNT, limit_grace_values, get_limit_grace, set_limit_grace, reset_limit_grace);
 	simple_mode_items[idx++] = (SettingItem)ITEM_BUTTON_INIT(
 		"How it works", "Explains Simple Mode and PIN recovery.",
 		show_simple_mode_help);

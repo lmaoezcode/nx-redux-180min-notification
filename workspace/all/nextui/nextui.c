@@ -249,6 +249,7 @@ int main(int argc, char* argv[]) {
 				  // requested when Home is first shown
 	bootStamp("after menu init");
 	GameSwitcher_init();
+	GameList_playLimitNotice(); // a launch the daily play limit refused (Simple Mode): say why, offer the PIN
 	int lastScreen = SCREEN_OFF;
 	int currentScreen = CFG_getDefaultView();
 

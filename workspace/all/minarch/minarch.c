@@ -502,6 +502,17 @@ int main(int argc, char* argv[]) {
 					LOG_info("daily play-time: showing reminder \"%s\"\n", playtime_message);
 					Notification_push(NOTIFICATION_PLAY_TIME, playtime_message, NULL);
 				}
+				// Daily limit ran out (Simple Mode): save and leave like the Save & Quit
+				// shortcut does. NextUI then offers to resume this save; the launch gate
+				// keeps it closed until the next day or an unlock.
+				if (DailyPlayTime_clientTakeQuit()) {
+					LOG_info("daily play-time: limit reached, saving and quitting\n");
+					Netplay_quitAll();
+					newScreenshot = 1;
+					quit = 1;
+					Present_stop(); // the save state reads the frame back
+					Menu_saveState();
+				}
 			}
 		}
 		if (daily_active) {

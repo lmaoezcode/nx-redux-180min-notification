@@ -220,6 +220,11 @@ typedef struct
 	int playTimeFirstMinutes;
 	int playTimeRepeatMinutes;
 	int playTimeNotificationDuration;
+	int playTimeLimitMinutes;
+	int playTimeLimitWarnMinutes;
+	int playTimeLimitGraceSeconds;
+	int playTimeLimitExtraMinutes;
+	int playTimeLimitExtraMax;
 
 	// RetroAchievements
 	bool raEnable;
@@ -319,6 +324,12 @@ typedef struct
 #define CFG_DEFAULT_PLAYTIME_FIRST_MINUTES 60
 #define CFG_DEFAULT_PLAYTIME_REPEAT_MINUTES 60
 #define CFG_DEFAULT_PLAYTIME_NOTIFICATION_DURATION 5
+// Hard daily limit, a Simple Mode setting (0 minutes = off); read by playtimed
+#define CFG_DEFAULT_PLAYTIME_LIMIT_MINUTES 0
+#define CFG_DEFAULT_PLAYTIME_LIMIT_WARN_MINUTES 5
+#define CFG_DEFAULT_PLAYTIME_LIMIT_GRACE_SECONDS 180
+#define CFG_DEFAULT_PLAYTIME_LIMIT_EXTRA_MINUTES 15
+#define CFG_DEFAULT_PLAYTIME_LIMIT_EXTRA_MAX 3
 
 // RetroAchievements defaults
 #define CFG_DEFAULT_RA_ENABLE false
@@ -546,6 +557,16 @@ int CFG_getPlayTimeRepeatMinutes(void);
 void CFG_setPlayTimeRepeatMinutes(int minutes);
 int CFG_getPlayTimeNotificationDuration(void);
 void CFG_setPlayTimeNotificationDuration(int seconds);
+int CFG_getPlayTimeLimitMinutes(void);
+void CFG_setPlayTimeLimitMinutes(int value);
+int CFG_getPlayTimeLimitWarnMinutes(void);
+void CFG_setPlayTimeLimitWarnMinutes(int value);
+int CFG_getPlayTimeLimitGraceSeconds(void);
+void CFG_setPlayTimeLimitGraceSeconds(int value);
+int CFG_getPlayTimeLimitExtraMinutes(void);
+void CFG_setPlayTimeLimitExtraMinutes(int value);
+int CFG_getPlayTimeLimitExtraMax(void);
+void CFG_setPlayTimeLimitExtraMax(int value);
 
 // RetroAchievements settings
 bool CFG_getRAEnable(void);

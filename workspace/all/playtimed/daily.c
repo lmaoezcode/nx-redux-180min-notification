@@ -148,3 +148,93 @@ bool DailyPlayTime_gameCommand(const char* command, const char* sdcard) {
 	len = snprintf(directory, sizeof(directory), "%s/.system/paks/Emus", sdcard);
 	return len >= 0 && (size_t)len < sizeof(directory) && under(words[0], directory);
 }
+
+// ---- Hard daily limit -----------------------------------------------------
+
+static int extra_count(const DailyExtra* extra, int today) {
+	return extra && extra->date == today && extra->count > 0 ? extra->count : 0;
+}
+
+uint64_t DailyLimit_allowanceMs(const DailyLimitConfig* config, const DailyExtra* extra, int today) {
+	if (!config || config->limit_minutes <= 0)
+		return 0;
+	uint64_t minutes = (uint64_t)config->limit_minutes;
+	if (config->extra_minutes > 0)
+		minutes += (uint64_t)config->extra_minutes * (uint64_t)extra_count(extra, today);
+	uint64_t ms = minutes * DAILY_MINUTE_MS;
+	return ms > DAILY_LIMIT_MS ? DAILY_LIMIT_MS : ms;
+}
+
+int64_t DailyLimit_remainingMs(const DailyPlayTime* state, const DailyLimitConfig* config,
+							   const DailyExtra* extra, int today) {
+	uint64_t played = state && state->date == today ? state->elapsed_ms : 0;
+	return (int64_t)DailyLimit_allowanceMs(config, extra, today) - (int64_t)played;
+}
+
+DailyLimitPhase DailyLimit_phase(const DailyPlayTime* state, const DailyLimitConfig* config,
+								 const DailyExtra* extra, int today) {
+	if (!config || !config->enabled || config->limit_minutes <= 0)
+		return DAILY_LIMIT_OK;
+	// The ledger stops at 24 h, so an allowance of a full day can never be reached.
+	if (DailyLimit_allowanceMs(config, extra, today) >= DAILY_LIMIT_MS)
+		return DAILY_LIMIT_OK;
+	int64_t left = DailyLimit_remainingMs(state, config, extra, today);
+	int64_t grace = (int64_t)(config->grace_seconds > 0 ? config->grace_seconds : 0) * 1000;
+	if (left <= -grace)
+		return DAILY_LIMIT_EXPIRED;
+	if (left <= 0)
+		return DAILY_LIMIT_REACHED;
+	if (left <= (int64_t)DAILY_MINUTE_MS)
+		return DAILY_LIMIT_LAST;
+	if (config->warn_minutes > 1 && left <= (int64_t)config->warn_minutes * (int64_t)DAILY_MINUTE_MS)
+		return DAILY_LIMIT_WARN;
+	return DAILY_LIMIT_OK;
+}
+
+bool DailyLimit_canGrant(const DailyLimitConfig* config, const DailyExtra* extra, int today) {
+	if (!config || !config->enabled || config->extra_minutes <= 0)
+		return false;
+	return config->extra_max <= 0 || extra_count(extra, today) < config->extra_max;
+}
+
+void DailyLimit_grant(DailyExtra* extra, int today) {
+	if (!extra)
+		return;
+	int count = extra_count(extra, today);
+	extra->date = today;
+	extra->count = count < 1000 ? count + 1 : count;
+}
+
+void DailyLimit_message(DailyLimitPhase phase, int64_t remaining_ms, int grace_seconds,
+						char* out, size_t size) {
+	if (phase == DAILY_LIMIT_WARN) {
+		long long minutes = (remaining_ms + (int64_t)DAILY_MINUTE_MS - 1) / (int64_t)DAILY_MINUTE_MS;
+		snprintf(out, size, "%lld min of play time left today.", minutes);
+	} else if (phase == DAILY_LIMIT_LAST) {
+		snprintf(out, size, "1 minute of play time left today.");
+	} else if (phase == DAILY_LIMIT_REACHED) {
+		long long left = grace_seconds + remaining_ms / 1000; // remaining_ms is <= 0 here
+		if (left < 0)
+			left = 0;
+		if (left >= 90)
+			snprintf(out, size, "Time's up. Closing in %lld min. Save now.", (left + 59) / 60);
+		else
+			snprintf(out, size, "Time's up. Closing in %lld s. Save now.", left);
+	} else {
+		snprintf(out, size, "Time's up for today.");
+	}
+}
+
+bool DailyExtra_parse(DailyExtra* extra, const char* record) {
+	int version, date, count, used = 0;
+	if (!extra || !record ||
+		sscanf(record, "NX_DAILY_EXTRA %d %d %d %n", &version, &date, &count, &used) != 3 || !used ||
+		record[used] || version != 1 || !valid_date(date) || count < 0 || count > 1000)
+		return false;
+	*extra = (DailyExtra){date, count};
+	return true;
+}
+
+int DailyExtra_format(const DailyExtra* extra, char* out, size_t size) {
+	return snprintf(out, size, "NX_DAILY_EXTRA 1 %d %d\n", extra->date, extra->count);
+}

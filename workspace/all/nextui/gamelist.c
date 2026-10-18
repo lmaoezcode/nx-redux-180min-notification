@@ -59,6 +59,7 @@
 #include <libgen.h>
 #include <math.h>
 #include <stdio.h>
+#include <sys/wait.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -930,6 +931,87 @@ static void collectionStem(const char* path, char* out /* MAX_PATH */) {
 // A one-button notice (A or B closes it).
 static void collectionNotice(const char* title, const char* subtitle) {
 	UI_confirmModalHints(screen, title, subtitle, (char*[]){"A", "OK", NULL}, NULL, true, false);
+}
+
+// ---- Daily play limit (Simple Mode) -------------------------------------------
+// The supervisor refused to start a game because today's limit is used up and left
+// /tmp/nx-playtime-blocked. Say so; the Simple Mode PIN adds time (playtimed records it).
+#define PLAY_LIMIT_BLOCKED_PATH "/tmp/nx-playtime-blocked"
+
+static void formatMinutes(char* out, size_t size, long minutes) {
+	if (minutes < 0)
+		minutes = 0;
+	if (minutes >= 60)
+		snprintf(out, size, "%ldh %ldm", minutes / 60, minutes % 60);
+	else
+		snprintf(out, size, "%ldm", minutes);
+}
+
+static bool playLimitPinOk(void) {
+	char pin[PINDIALOG_PIN_LEN + 1];
+	if (!SimpleMode_readPin(pin))
+		return false; // no PIN: nothing can be unlocked (and the limit is not in force either)
+	const char* error = NULL;
+	GFX_clearLayers(LAYER_ALL);
+	while (1) {
+		char entered[PINDIALOG_PIN_LEN + 1];
+		if (!UI_pinModal(screen, "Enter PIN to add time", error, entered, NULL, false, false))
+			break;
+		if (strcmp(entered, pin) == 0) {
+			GFX_clearLayers(LAYER_ALL);
+			return true;
+		}
+		error = "Wrong PIN. Try again.";
+	}
+	GFX_clearLayers(LAYER_ALL);
+	return false;
+}
+
+void GameList_playLimitNotice(void) {
+	if (!exists(PLAY_LIMIT_BLOCKED_PATH))
+		return;
+	unlink(PLAY_LIMIT_BLOCKED_PATH);
+
+	int enabled = 0, limit = 0, grants = 0, max = 0, extra = 0, can_grant = 0;
+	long used = 0, left = 0;
+	FILE* status = popen("playtimed.elf --status 2>/dev/null", "r");
+	if (status) {
+		char line[256];
+		if (fgets(line, sizeof(line), status))
+			sscanf(line, "enabled=%d limit=%d used=%ld left=%ld grants=%d max=%d extra=%d can_grant=%d", &enabled,
+				   &limit, &used, &left, &grants, &max, &extra, &can_grant);
+		pclose(status);
+	}
+	if (!enabled)
+		return; // the limit was switched off meanwhile: nothing to explain
+
+	while (1) {
+		char played[24], allowed[24], subtitle[256];
+		formatMinutes(played, sizeof(played), used);
+		formatMinutes(allowed, sizeof(allowed), limit + (long)extra * grants);
+		if (can_grant)
+			snprintf(subtitle, sizeof(subtitle), "Played %s today (limit %s). A adds %d min with the PIN.", played, allowed,
+					 extra);
+		else
+			snprintf(subtitle, sizeof(subtitle), "Played %s today (limit %s). No more time can be added today.", played,
+					 allowed);
+		bool add = UI_confirmModalHints(screen, "Time's up for today", subtitle,
+										can_grant ? (char*[]){"B", "OK", "A", "ADD TIME", NULL} : (char*[]){"A", "OK", NULL},
+										NULL, true, false);
+		if (!add || !can_grant || !playLimitPinOk())
+			return;
+		int rc = system("playtimed.elf --grant >/dev/null 2>&1");
+		if (rc != -1 && WIFEXITED(rc) && WEXITSTATUS(rc) == 0) {
+			grants++;
+			can_grant = max <= 0 || grants < max;
+			char note[96];
+			snprintf(note, sizeof(note), "Added %d minutes. You can start a game now.", extra);
+			collectionNotice("Time added", note);
+			return;
+		}
+		collectionNotice("Could not add time", "The limit does not allow more today.");
+		return;
+	}
 }
 
 // Move the file. A case-only change goes old -> <new>.txt.part -> <new>.txt: on case-insensitive storage (the FAT
