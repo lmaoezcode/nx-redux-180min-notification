@@ -392,6 +392,9 @@ while [ -f $EXEC_PATH ]; do
 		# ownership of the gadget. Ordinary games do not touch the gadget and
 		# must not tear down/re-enumerate MTP every time they exit.
 		USB_MODE_BEFORE=$(nx_usb_mode.sh status 2>/dev/null)
+		# A USB Cable link left behind reports "link"; the mode it will hand back
+		# (written by nx_usb_mode.sh link-start) is the one to keep.
+		[ "$USB_MODE_BEFORE" != "link" ] || USB_MODE_BEFORE=$(cat /tmp/nx_usb_link_active 2>/dev/null)
 		[ "$USB_MODE_BEFORE" = "mtp" ] || USB_MODE_BEFORE=adb
 		# The launcher may be sitting at its 600 MHz idle cap (nextui/
 		# cpu_policy.h); hand every pak the boot-default range instead, the

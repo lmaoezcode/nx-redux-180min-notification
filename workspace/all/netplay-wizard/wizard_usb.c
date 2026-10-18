@@ -23,19 +23,31 @@
 
 #define USBLINK_STATE_PATH "/tmp/usblink.state"
 #define USBLINK_PID_PATH "/tmp/usblink.pid"
+// Written by `nx_usb_mode.sh link-start`; it also holds the USB mode to give
+// back (MTP or ADB) and stays until `link-stop` has done so.
+#define USBLINK_MARKER_PATH "/tmp/nx_usb_link_active"
 
-// Any pidfile, live pid or not: a SIGKILLed daemon leaves its pidfile behind
-// together with a gadget that may still be linked, and that dead-pid case is
-// exactly the one `usblink.elf stop` has to repair. stop removes the pidfile,
-// so this goes false again once anything has cleaned up.
+// The link is started and stopped through nx_usb_mode.sh (link-start /
+// link-stop), never by running usblink.elf directly: usblink rebinds the UDC of
+// the same gadget as MTP, USB Storage and USB Gamepad, and only nx_usb_mode.sh
+// takes the USB guard, stops MTP first and gives it back afterwards.
+
+// Any pidfile, live pid or not, or the marker: a SIGKILLed daemon leaves its
+// pidfile behind together with a gadget that may still be linked, and that
+// dead-pid case is exactly the one link-stop has to repair; the marker covers a
+// link-stop that was cut off before MTP came back. link-stop removes both, so
+// this goes false again once anything has cleaned up.
 bool wiz_usb_link_may_be_up(void) {
-	return access(USBLINK_PID_PATH, F_OK) == 0;
+	return access(USBLINK_PID_PATH, F_OK) == 0 || access(USBLINK_MARKER_PATH, F_OK) == 0;
 }
 
 void wiz_usb_link_stop(void) {
-	// Always, not only when the pidfile looks alive: `stop` is also the repair
-	// for a daemon that was SIGKILLed with the gadget function still linked.
-	system("usblink.elf stop >/dev/null 2>&1");
+	// Called on every wizard teardown, USB session or not. Without a pidfile or
+	// marker there is nothing to repair, and link-stop (guarded, pauses adb for a
+	// moment) must not run for Hotspot/WiFi sessions.
+	if (!wiz_usb_link_may_be_up())
+		return;
+	system("nx_usb_mode.sh link-stop >/dev/null 2>&1");
 }
 
 // GFX_blitText centres inside dst_rect, so a full-width rect at y is a centred
@@ -75,9 +87,10 @@ int wiz_usb_link_up(WizSession* s) {
 	// put the cabling hint up first rather than leaving the mode menu on show
 	// with B dead underneath it.
 	wiz_usb_render("Starting USB link...", false);
-	if (system("usblink.elf start >/dev/null 2>&1") != 0) {
-		// A slow-starting daemon may still be alive after a failed start, so
-		// the stop inside wiz_usb_fail() is not optional.
+	if (system("nx_usb_mode.sh link-start >/dev/null 2>&1") != 0) {
+		// link-start repairs and gives MTP back itself when the daemon fails to
+		// start; the stop inside wiz_usb_fail() still covers a daemon that was
+		// slow to report and is alive now (it does nothing when nothing is left).
 		wiz_usb_fail("USB link could not start.", 1500);
 		return -1;
 	}

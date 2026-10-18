@@ -16,8 +16,13 @@ USB_ROLE_ROOT=/sys/devices/platform/soc/usbc0
 USB_ROLE_DEVICE="$USB_ROLE_ROOT/usb_device"
 USB_ROLE_STATE="$USB_ROLE_ROOT/otg_role"
 STORAGE_MARKER=/tmp/nx_usb_storage_active
+# USB Gamepad's own marker (usbgamepad.c ACTIVE_MARKER) and the USB-link marker
+# written by link-start: `status` prints "link" while the latter exists.
+GAMEPAD_MARKER=/tmp/nx_usb_gamepad_active
+LINK_MARKER=/tmp/nx_usb_link_active
 SCRIPT_DIR="${NX_USB_RUNTIME_DIR:-$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 UMTP_BIN="$SCRIPT_DIR/umtprd"
+USBLINK_BIN="${NX_USBLINK_BIN:-$SCRIPT_DIR/usblink.elf}"
 UMTP_CONFIG="$SCRIPT_DIR/../etc/umtprd.conf"
 USB_GUARD="${NX_USB_GUARD:-$SCRIPT_DIR/nx_usb_guard.elf}"
 
@@ -400,25 +405,119 @@ start_mtp() {
 	return 0
 }
 
+current_mode() {
+	if storage_open || [ -e "$STORAGE_MARKER" ]; then
+		echo "storage"
+	elif pidof umtprd >/dev/null 2>&1 && mounted_at "$FFS_DIR" &&
+		[ -L "$GADGET/configs/c.1/ffs.mtp" ] && gadget_bound; then
+		echo "mtp"
+	else
+		echo "adb"
+	fi
+}
+
+# --- USB Cable netplay link (usblink.elf) -----------------------------------
+# usblink adds a FunctionFS "ffs.net" function to the same gadget g1 and the
+# stock `setusbconfig` never removes it, so a link that is alive (or a dead one
+# that was never repaired) would be carried into every later mode change. The
+# link therefore owns the gadget like USB Storage does: link-start (through the
+# guard, like every action here) puts the gadget in the ADB-only shape upstream
+# tested, starts the daemon, and records the previous mode in LINK_MARKER; every
+# other mode change is refused while the marker exists; link-stop repairs the
+# gadget and puts the previous mode back.
+link_active() {
+	[ -e "$LINK_MARKER" ]
+}
+
+refuse_if_link() {
+	link_active || return 0
+	log "USB link is active; $1 refused (leave USB Cable netplay or run link-stop)"
+	return 1
+}
+
+link_start() {
+	checkpoint link_start_begin
+	[ -x "$USBLINK_BIN" ] || { log "usblink is missing: $USBLINK_BIN"; return 1; }
+	if link_active; then
+		# A second start only makes sure the daemon is up; the recorded previous
+		# mode stays the one from before the first link-start.
+		"$USBLINK_BIN" start >> "$LOG" 2>&1 || { log "usblink start failed (link already marked)"; return 1; }
+		log "USB link already active"
+		return 0
+	fi
+	[ ! -e "$GAMEPAD_MARKER" ] || { log "USB Gamepad is active; USB link refused"; return 1; }
+	if [ -e "$STORAGE_MARKER" ] || storage_open; then
+		log "USB storage session/backing LUN is active; USB link refused"
+		return 1
+	fi
+	link_prior="$(current_mode)"
+	case "$link_prior" in
+		mtp) stop_mtp || { log "could not stop MTP for the USB link"; return 1; } ;;
+		adb) ;;
+		*) log "USB mode '$link_prior' cannot host the USB link"; return 1 ;;
+	esac
+	# Marker before the daemon: a crash from here on is repaired by link-stop.
+	printf '%s\n' "$link_prior" > "$LINK_MARKER" || {
+		log "could not write $LINK_MARKER"
+		[ "$link_prior" != mtp ] || start_mtp || true
+		return 1
+	}
+	if ! "$USBLINK_BIN" start >> "$LOG" 2>&1; then
+		log "usblink start failed; repairing the gadget"
+		link_stop || true
+		return 1
+	fi
+	log "USB link started (mode before: $link_prior)"
+	checkpoint link_start_end
+	return 0
+}
+
+link_stop() {
+	checkpoint link_stop_begin
+	# `usblink.elf stop` always exits 0 and is the repair for a daemon that was
+	# killed with ffs.net still linked, so it runs whether or not the marker is
+	# there. Without the binary there is nothing to repair; the marker logic
+	# below still decides whether a previous mode has to come back.
+	if [ -x "$USBLINK_BIN" ]; then
+		"$USBLINK_BIN" stop >> "$LOG" 2>&1 || log "usblink stop reported an error"
+	else
+		log "usblink is missing: $USBLINK_BIN; nothing to repair"
+	fi
+	if [ ! -e "$LINK_MARKER" ]; then
+		log "no USB link marker; gadget repaired only"
+		return 0
+	fi
+	link_prior=adb
+	read -r link_prior < "$LINK_MARKER" || true
+	if [ "$link_prior" = mtp ]; then
+		# The marker stays until MTP is back, so a failed restore is retried by
+		# the next link-stop and status keeps saying "link" instead of "adb".
+		start_mtp || { log "MTP restore after the USB link failed"; return 1; }
+	fi
+	rm -f "$LINK_MARKER"
+	log "USB link stopped (mode restored: $link_prior)"
+	checkpoint link_stop_end
+	return 0
+}
+
 lock || exit 1
 
 case "$ACTION" in
-	start|restore) start_mtp ;;
-	stop) stop_mtp ;;
-	storage-start) storage_start ;;
+	start|restore) refuse_if_link "$ACTION" && start_mtp ;;
+	stop) refuse_if_link stop && stop_mtp ;;
+	storage-start) refuse_if_link storage-start && storage_start ;;
 	storage-detach) storage_detach ;;
+	link-start) link_start ;;
+	link-stop) link_stop ;;
 	status)
-		if storage_open || [ -e "$STORAGE_MARKER" ]; then
-			echo "storage"
-		elif pidof umtprd >/dev/null 2>&1 && mounted_at "$FFS_DIR" &&
-			[ -L "$GADGET/configs/c.1/ffs.mtp" ] && gadget_bound; then
-			echo "mtp"
+		if link_active; then
+			echo "link"
 		else
-			echo "adb"
+			current_mode
 		fi
 		;;
 	*)
-		echo "usage: $0 {start|stop|restore|status|storage-start /dev/mmcblk1p1|storage-detach}" >&2
+		echo "usage: $0 {start|stop|restore|status|link-start|link-stop|storage-start /dev/mmcblk1p1|storage-detach}" >&2
 		exit 2
 		;;
 esac

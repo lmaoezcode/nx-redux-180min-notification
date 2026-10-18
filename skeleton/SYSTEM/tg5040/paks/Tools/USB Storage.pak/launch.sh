@@ -147,6 +147,7 @@ refuse_export() {
 			*"card is still in use"*) refusal_text="Card is busy. Use MTP or a card reader." ;;
 			*"MTP did not stop"*) refusal_text="MTP did not stop. USB Storage cancelled." ;;
 			*"NX service"*) refusal_text="Background service is busy. USB Storage cancelled." ;;
+			*"USB link is active"*) refusal_text="USB link is active. Leave Netplay first." ;;
 		esac
 		show2.elf --mode=progress --image=/dev/null --text="$refusal_text" --timeout=5
 	fi
@@ -203,6 +204,9 @@ case "$SD_DEVICE" in
 	*) refuse_export "mounted SD partition cannot be identified" ;;
 esac
 USB_MODE_BEFORE="$(usb_mode status)" || refuse_export "USB mode status unavailable"
+# A USB Cable netplay link owns the gadget (nx_usb_mode.sh link-start); exporting
+# the card while its function is linked is refused, and nothing has been changed yet.
+[ "$USB_MODE_BEFORE" != link ] || refuse_export "USB link is active"
 [ "$USB_MODE_BEFORE" = mtp ] || USB_MODE_BEFORE=adb
 touch "$STORAGE_MARKER" /tmp/stay_awake
 # Show the rootfs-only USB UI immediately: B works during preparation too.

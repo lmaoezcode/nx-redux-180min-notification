@@ -49,7 +49,7 @@ def put(path, content):
     path.write_text(content, encoding='utf-8', newline='\n')
 
 
-def run(base, script, scenario, setup='true'):
+def run(base, script, scenario, setup='true', guarded=True):
     env = os.environ.copy()
     if os.name == 'nt':
         # Git Bash otherwise deep-copies directory targets instead of making
@@ -57,6 +57,10 @@ def run(base, script, scenario, setup='true'):
         env['MSYS'] = 'winsymlinks:sys'
     env.update(FIXTURE=unix(base), SCENARIO=scenario, SDCARD_PATH=unix(base / 'sd'),
                SYSTEM_PATH=unix(base / 'system'), PLATFORM='tg5040', NX_USB_GUARDED='1')
+    if not guarded:
+        # Exercise the script's own guard gate: no NX_USB_GUARDED, guard missing.
+        env.pop('NX_USB_GUARDED')
+        env['NX_USB_GUARD'] = unix(base / 'system/bin/no-such-guard.elf')
     command = ('chmod +x "$FIXTURE/bin"/* "$FIXTURE/system/bin"/* '
                '"$FIXTURE/stock/usb_storage" "$FIXTURE/setter.sh" 2>/dev/null; '
                'export PATH="$FIXTURE/bin:$PATH"; ' + setup + '; sh ' + script)
@@ -116,7 +120,8 @@ def transformed_wrapper(base):
 
 for scenario in ('busy', 'alias', 'partition2', 'clean', 'adb_before', 'missing',
                  'stop_fail', 'start_fail', 'detach_fail', 'remount_fail',
-                 'service_stop_fail', 'service_restore_fail', 'mode_restore_fail', 'cancel_prepare'):
+                 'service_stop_fail', 'service_restore_fail', 'mode_restore_fail', 'cancel_prepare',
+                 'link_active'):
     with scratch('nxusb-test-') as base:
         prepare(base)
         if scenario == 'missing':
@@ -142,7 +147,7 @@ esac
         put(base / 'system/bin/nx_usb_mode.sh', '''#!/bin/sh
 echo "$1" >> "$FIXTURE/events"
 case "$1" in
- status) [ "$SCENARIO" = adb_before ] && echo adb || echo mtp ;;
+ status) case "$SCENARIO" in adb_before) echo adb ;; link_active) echo link ;; *) echo mtp ;; esac ;;
  stop) [ "$SCENARIO" != stop_fail ] ;;
  storage-start)
   [ "$SCENARIO" != start_fail ] || exit 1
@@ -195,7 +200,7 @@ echo "/dev/mmcblk1p1 $SDCARD_PATH exfat rw 0 0" >> "$FIXTURE/mounts"
             assert not (base / 'exported').exists(), details
             assert not (base / 'active').exists(), details
             assert (base / 'sd/.userdata/tg5040/logs/usb-thermal.txt').exists(), details
-            if scenario in ('adb_before', 'service_stop_fail', 'cancel_prepare'):
+            if scenario in ('adb_before', 'service_stop_fail', 'cancel_prepare', 'link_active'):
                 assert 'restore' not in events, details
             else:
                 assert events[-1] == 'restore', details
@@ -207,6 +212,13 @@ echo "/dev/mmcblk1p1 $SDCARD_PATH exfat rw 0 0" >> "$FIXTURE/mounts"
                     assert events.index('mount') < events.index('services:restore'), details
         if scenario in ('service_restore_fail', 'mode_restore_fail'):
             assert result.returncode != 0, details
+        if scenario == 'link_active':
+            # A USB link owns the gadget: refused before the UI, services, MTP stop
+            # or unmount are touched, and nothing is restored because nothing changed.
+            assert result.returncode != 0, details
+            for untouched in ('ui-start', 'services:prepare', 'stop', 'unmount', 'storage-start'):
+                assert untouched not in events, details
+            assert 'USB link is active' in details[4], details
         print('PASS wrapper', scenario, flush=True)
 
 
@@ -217,6 +229,8 @@ def transformed_helper(base):
         '/tmp/nx_usb_mode.lock': unix(base / 'mode.lock'),
         '/tmp/nx-mtp.log': unix(base / 'mode.log'),
         '/tmp/nx_usb_storage_active': unix(base / 'active'),
+        '/tmp/nx_usb_gamepad_active': unix(base / 'gamepad-active'),
+        '/tmp/nx_usb_link_active': unix(base / 'link-active'),
         '/dev/ffs-umtp': unix(base / 'ffs'),
         '/mnt/SDCARD': unix(base / 'sd'),
         '/proc/mounts': unix(base / 'mounts'),
@@ -377,6 +391,166 @@ exec /usr/bin/cat "$@"
             check = run(base, '-c "test ! -L \\\"$FIXTURE/gadget/configs/c.1/f1\\\""', scenario)
             assert check.returncode == 0, details
         print('PASS coordinator', scenario, flush=True)
+
+# USB Cable netplay link (usblink): nx_usb_mode.sh owns the gadget while it runs.
+# usblink.elf is a fixture that only records its arguments; the mode logic,
+# guard gate, markers and MTP stop/restore run unchanged.
+LINK_SCENARIOS = (
+    'link_start_from_mtp', 'link_start_from_adb', 'link_start_fail_gives_mtp_back',
+    'link_start_storage_marker', 'link_start_gamepad_marker', 'link_start_no_usblink',
+    'link_start_storage_mode', 'link_start_twice', 'link_start_twice_fail',
+    'link_start_guard_missing',
+    'link_stop_adb', 'link_stop_mtp', 'link_stop_mtp_fails', 'link_stop_no_marker',
+    'link_stop_no_binary', 'link_stop_guard_missing',
+    'link_status', 'link_status_none',
+    'link_blocks_stop', 'link_blocks_restore', 'link_blocks_storage_start',
+    'link_blocks_ok_without_marker',
+)
+for scenario in LINK_SCENARIOS:
+    with scratch('nxusb-link-') as base:
+        prepare(base)
+        put(base / 'block-device-present', '')
+        put(base / 'gadget/UDC', 'controller\n')
+        # No endpoint file = the MTP responder never became ready, so start_mtp gives
+        # up. A responder that merely exits is a race: a zombie child passes kill -0.
+        if scenario != 'link_stop_mtp_fails':
+            put(base / 'ffs/ep1', '')
+        put(base / 'bin/pidof', '#!/bin/sh\n[ -f "$FIXTURE/process" ]\n')
+        put(base / 'bin/killall', '#!/bin/sh\nrm -f "$FIXTURE/process"\n')
+        put(base / 'bin/umount', """#!/bin/sh
+awk -v root="$FIXTURE/ffs" '$2 != root' "$FIXTURE/mounts" > "$FIXTURE/mounts.next"
+mv "$FIXTURE/mounts.next" "$FIXTURE/mounts"
+""")
+        put(base / 'bin/mount', '#!/bin/sh\nexit 0\n')
+        put(base / 'bin/readlink', """#!/bin/sh
+for arg; do last="$arg"; done
+case "$last" in
+ /dev/mmcblk*) echo "$last" ;;
+ *) /usr/bin/readlink "$@" ;;
+esac
+""")
+        put(base / 'setter.sh', """#!/bin/sh
+echo "setter:$1" >> "$FIXTURE/events"
+ln -sf "$FIXTURE/gadget/functions/ffs.adb" "$FIXTURE/gadget/configs/c.1/ffs.adb"
+echo controller > "$FIXTURE/gadget/UDC"
+""")
+        # The MTP responder start_mtp launches: alive long enough for its liveness check.
+        put(base / 'system/bin/umtprd', '#!/bin/sh\nexec /usr/bin/sleep 2\n')
+        put(base / 'system/etc/umtprd.conf', 'fixture\n')
+        put(base / 'system/bin/usblink.elf', """#!/bin/sh
+echo "usblink:$1" >> "$FIXTURE/events"
+if [ "$1" = start ] && { [ "$SCENARIO" = link_start_fail_gives_mtp_back ] || [ "$SCENARIO" = link_start_twice_fail ]; }; then
+ exit 1
+fi
+exit 0
+""")
+        if scenario in ('link_start_no_usblink', 'link_stop_no_binary'):
+            (base / 'system/bin/usblink.elf').unlink()
+
+        def mtp_active():
+            put(base / 'process', '')
+            with (base / 'mounts').open('a') as file:
+                file.write('mtp ' + unix(base / 'ffs') + ' functionfs rw 0 0\n')
+            (base / 'gadget/configs/c.1/ffs.mtp').symlink_to(base / 'gadget/functions/ffs.mtp')
+
+        action = 'link-start'
+        guarded = True
+        if scenario in ('link_start_from_mtp', 'link_start_fail_gives_mtp_back'):
+            mtp_active()
+        elif scenario == 'link_start_storage_marker':
+            put(base / 'active', '')
+        elif scenario == 'link_start_gamepad_marker':
+            put(base / 'gamepad-active', '')
+        elif scenario == 'link_start_storage_mode':
+            put(base / 'gadget/functions/mass_storage.usb0/lun.0/file', '/dev/mmcblk1\n')
+        elif scenario in ('link_start_twice', 'link_start_twice_fail'):
+            put(base / 'link-active', 'mtp\n')
+        elif scenario == 'link_start_guard_missing':
+            guarded = False
+        elif scenario in ('link_stop_adb', 'link_stop_no_binary'):
+            action = 'link-stop'
+            put(base / 'link-active', 'adb\n')
+        elif scenario in ('link_stop_mtp', 'link_stop_mtp_fails'):
+            action = 'link-stop'
+            put(base / 'link-active', 'mtp\n')
+        elif scenario == 'link_stop_no_marker':
+            action = 'link-stop'
+        elif scenario == 'link_stop_guard_missing':
+            action = 'link-stop'
+            put(base / 'link-active', 'mtp\n')
+            guarded = False
+        elif scenario in ('link_status', 'link_status_none'):
+            action = 'status'
+            if scenario == 'link_status':
+                put(base / 'link-active', 'mtp\n')
+        elif scenario.startswith('link_blocks_'):
+            action = {'link_blocks_stop': 'stop', 'link_blocks_restore': 'restore',
+                      'link_blocks_storage_start': 'storage-start /dev/mmcblk1p1',
+                      'link_blocks_ok_without_marker': 'stop'}[scenario]
+            if scenario == 'link_blocks_ok_without_marker':
+                mtp_active()
+            else:
+                put(base / 'link-active', 'mtp\n')
+            if scenario == 'link_blocks_storage_start':
+                put(base / 'mounts', '')
+        transformed_helper(base)
+        result = run(base, '"$FIXTURE/system/bin/nx_usb_mode.sh" ' + action, scenario, guarded=guarded)
+        events = (base / 'events').read_text().splitlines()
+        mode_log = (base / 'mode.log').read_text() if (base / 'mode.log').exists() else ''
+        marker = (base / 'link-active').read_text().strip() if (base / 'link-active').exists() else None
+        details = (scenario, result.returncode, events, marker, result.stdout, result.stderr, mode_log)
+
+        ok_scenarios = ('link_start_from_mtp', 'link_start_from_adb', 'link_start_twice',
+                        'link_stop_adb', 'link_stop_mtp', 'link_stop_no_marker', 'link_stop_no_binary',
+                        'link_status', 'link_status_none', 'link_blocks_ok_without_marker')
+        assert (result.returncode == 0) == (scenario in ok_scenarios), details
+
+        if scenario == 'link_start_from_mtp':
+            # MTP is stopped (ADB-only gadget, the shape upstream tested) BEFORE the daemon starts.
+            assert events == ['setter:adb', 'usblink:start'], details
+            assert marker == 'mtp', details
+        elif scenario == 'link_start_from_adb':
+            assert events == ['usblink:start'] and marker == 'adb', details
+        elif scenario == 'link_start_fail_gives_mtp_back':
+            # The daemon failed: repaired (usblink stop), MTP restored, no marker left.
+            assert events[:3] == ['setter:adb', 'usblink:start', 'usblink:stop'], details
+            assert events.count('setter:adb') == 2 and marker is None, details
+            assert 'MTP active' in mode_log and 'usblink start failed' in mode_log, details
+        elif scenario in ('link_start_storage_marker', 'link_start_gamepad_marker',
+                          'link_start_no_usblink', 'link_start_storage_mode', 'link_start_guard_missing'):
+            assert events == [] and marker is None, details
+            if scenario == 'link_start_guard_missing':
+                assert 'Missing USB transaction guard' in result.stderr, details
+        elif scenario in ('link_start_twice', 'link_start_twice_fail'):
+            # Idempotent: only makes sure the daemon is up, keeps the recorded mode.
+            assert events == ['usblink:start'] and marker == 'mtp', details
+        elif scenario == 'link_stop_adb':
+            assert events == ['usblink:stop'] and marker is None, details
+        elif scenario == 'link_stop_no_binary':
+            assert events == [] and marker is None, details
+        elif scenario == 'link_stop_no_marker':
+            assert events == ['usblink:stop'] and marker is None, details
+        elif scenario == 'link_stop_mtp':
+            assert events[0] == 'usblink:stop' and 'setter:adb' in events and marker is None, details
+            assert 'MTP active' in mode_log and 'mode restored: mtp' in mode_log, details
+        elif scenario == 'link_stop_mtp_fails':
+            # MTP did not come back: the marker stays so status keeps saying "link"
+            # and the next link-stop retries instead of reporting a false success.
+            assert events[0] == 'usblink:stop' and marker == 'mtp', details
+            assert 'MTP restore after the USB link failed' in mode_log, details
+        elif scenario == 'link_stop_guard_missing':
+            assert events == [] and marker == 'mtp', details
+        elif scenario == 'link_status':
+            assert result.stdout.strip() == 'link' and events == [], details
+        elif scenario == 'link_status_none':
+            assert result.stdout.strip() == 'adb' and events == [], details
+        elif scenario in ('link_blocks_stop', 'link_blocks_restore', 'link_blocks_storage_start'):
+            assert events == [] and marker == 'mtp', details
+            assert 'USB link is active' in mode_log, details
+        elif scenario == 'link_blocks_ok_without_marker':
+            assert 'setter:adb' in events, details
+        print('PASS usb link', scenario, flush=True)
+
 
 # Services use fake /proc links, stat/start-times, and signals. Never signal
 # a host process or execute a device binary from this test.

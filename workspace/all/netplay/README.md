@@ -148,6 +148,10 @@ netplay or the link backends knows about USB.
   discovery packets go unicast to the peer (`NET_sendDiscoveryTo`), and the
   client connects to `NETPLAY_PEER_IP` = `USBLINK_PEER_IP` (the hotspot
   "known host address" arm). `netplay_boot.c` needs nothing special.
+- **Who starts it**: not the wizard directly. `wizard_usb.c` runs
+  `nx_usb_mode.sh link-start` / `link-stop` (guarded; see AGENT.md 11.1), which
+  turn MTP off for the duration, run the commands below, and put MTP back.
+  Never run `usblink.elf start|stop` by hand on a device that has MTP up.
 - **CLI**: `start` (daemonize, return once the daemon publishes its first
   state — not once linked), `stop` (SIGTERM, ≤ 2 s, SIGKILL, then **repair**;
   always exit 0, safe when nothing is up), `status` (print the state file),

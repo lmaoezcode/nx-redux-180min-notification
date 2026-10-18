@@ -32,6 +32,11 @@ case "$1" in
 		[ -e "$STUB_DIR/stop_fail" ] && exit 1
 		echo adb > "$STUB_DIR/state"
 		;;
+	link-stop)
+		# A USB Cable link left behind: gives back the mode recorded in link_prior.
+		[ -e "$STUB_DIR/link_stop_fail" ] && exit 1
+		cat "$STUB_DIR/link_prior" > "$STUB_DIR/state"
+		;;
 	restore)
 		[ -e "$STUB_DIR/restore_abort" ] && exit 134
 		[ -e "$STUB_DIR/restore_fail" ] && exit 1
@@ -176,6 +181,46 @@ begin storage ok "storage active"
 drive 'usb_preflight'
 check "preflight refuses" rc_is 1
 check "only status was called" only_status
+check "user is told" shown
+
+# 13. A USB link left behind (status = link): one guarded link-stop gives the
+# previous mode back, then the session starts from that mode.
+begin link ok "link left behind, mtp before"
+echo mtp > "$T/state/link_prior"
+drive 'usb_preflight && usb_enter_gamepad_mode && restore_usb_mode'
+check "preflight heals and the session runs" rc_is 0
+check "link-stop ran exactly once" count_is link-stop 1
+check "link-stop came before stop" sh -c "grep -n -x -e link-stop -e stop '$T/state/calls' | head -1 | grep -q link-stop"
+check "mode before the session is the one link-stop restored" logged "USB mode before session: mtp"
+check "link marker noted in the log" logged "USB link marker found"
+check "back to mtp at the end" state_is mtp
+check "nothing shown to the user" not_shown
+
+begin link ok "link left behind, adb before"
+echo adb > "$T/state/link_prior"
+drive 'usb_preflight && usb_enter_gamepad_mode && restore_usb_mode'
+check "healed to adb, session runs" rc_is 0
+check "no MTP restore for an adb start" not_called restore
+check "ends in adb" state_is adb
+
+# 14. link-stop fails: the gadget is not ours; refuse, change nothing else.
+begin link ok "link left behind, link-stop fails"
+echo mtp > "$T/state/link_prior"
+touch "$T/state/link_stop_fail"
+drive 'usb_preflight'
+check "preflight refuses" rc_is 1
+check "tried link-stop once" count_is link-stop 1
+check "never stopped or restored" sh -c "! grep -q -x -e stop -e restore '$T/state/calls'"
+check "log says busy" logged "USB mode before session is 'link'"
+check "user is told" shown
+check "state untouched" state_is link
+
+# 15. Guard missing: a link marker must not make the tool call link-stop at all.
+begin link missing "link left behind, guard missing"
+echo mtp > "$T/state/link_prior"
+drive 'usb_preflight'
+check "refused before any helper call" rc_is 1
+check "only status-free refusal (no link-stop)" not_called link-stop
 check "user is told" shown
 
 # 10. Cleanup before the session ever started (early exit): no helper call.

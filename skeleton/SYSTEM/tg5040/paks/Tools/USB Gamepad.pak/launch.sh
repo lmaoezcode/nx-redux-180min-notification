@@ -85,11 +85,19 @@ usb_preflight() {
 	fi
 	USB_GUARD_OK=1
 	USB_PRE_MODE="$(usb_mode_status)"
+	if [ "$USB_PRE_MODE" = link ]; then
+		# A USB Cable netplay link left behind: its daemon outlives the wizard, and
+		# a crash or power-quit skips the teardown. One guarded link-stop gives the
+		# previous mode back; only then is the gadget free for the gamepad.
+		usb_log "USB link marker found; running link-stop first"
+		"$USB_MODE_SH" link-stop >> "$LOG_FILE" 2>&1 || usb_log "nx_usb_mode.sh link-stop failed"
+		USB_PRE_MODE="$(usb_mode_status)"
+	fi
 	case "$USB_PRE_MODE" in
 		mtp|adb) usb_log "USB mode before session: $USB_PRE_MODE" ;;
 		*)
 			usb_log "USB mode before session is '$USB_PRE_MODE'; refusing to start"
-			usb_notice "USB is busy ($USB_PRE_MODE)" "Close USB Storage first. Log: $LOG_FILE"
+			usb_notice "USB is busy ($USB_PRE_MODE)" "Close USB Storage or Netplay first. Log: $LOG_FILE"
 			return 1
 			;;
 	esac

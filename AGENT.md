@@ -514,6 +514,7 @@ Trên tg5040, `nx_usb_mode.sh` ghép uMTP-Responder FunctionFS với ADB. Các a
 - `restore`/`start`: tạo `ffs.mtp`, chạy `umtprd`, bind gadget ADB+MTP;
 - `stop`: dừng MTP và trả về ADB;
 - `status`: in `mtp` hoặc `adb`.
+- `link-start` / `link-stop`: USB Cable netplay (`usblink.elf`) đổi cùng gadget `g1` nên đi qua đây như mọi action đổi USB (guard bọc cả hai). `link-start` từ chối khi USB Storage/USB Gamepad đang chạy hoặc thiếu `usblink.elf`; nếu đang MTP thì `stop` MTP trước (gadget chỉ còn ADB, cấu hình upstream đã thử), ghi mode trước đó vào `/tmp/nx_usb_link_active`, rồi chạy `usblink.elf start`; daemon lỗi thì tự `link-stop`. `link-stop` luôn chạy `usblink.elf stop` (sửa gadget kể cả khi daemon bị kill), rồi `start_mtp` nếu trước đó là MTP; cờ chỉ bị xóa khi MTP đã về. Khi cờ còn: `status` in `link`; `start`/`restore`/`stop`/`storage-start` bị từ chối; USB Gamepad tự `link-stop` ở preflight, USB Storage từ chối (`USB link is active`). Lý do: `setusbconfig` stock chỉ xóa một danh sách link cố định, không có `ffs.net`, nên một link còn sót (hoặc daemon đã chết) làm ADB và MTP không bind được. `wizard_usb.c` chỉ gọi `nx_usb_mode.sh link-start|link-stop` (và chỉ khi còn pidfile hoặc cờ), không gọi `usblink.elf` trực tiếp.
 
 Runtime nằm ở:
 
