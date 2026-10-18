@@ -72,4 +72,15 @@ static inline int DailyPlayTime_clientTakeDue(char* out, size_t size) {
 	return out[0] != 0;
 }
 
+// Returns 1 once when the helper asks the game to close because the daily limit
+// ran out (the file is removed). The client saves and quits through its normal
+// route; the helper takes the process down itself if it does not.
+static inline int DailyPlayTime_clientTakeQuit(void) {
+	char path[4096];
+	if (!DailyPlayTime_clientPath(path, sizeof(path), "nx-playtime-quit")) return 0;
+	if (access(path, F_OK) != 0) return 0;
+	unlink(path);
+	return 1;
+}
+
 #endif

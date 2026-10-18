@@ -113,6 +113,11 @@ void CFG_defaults(NextUISettings* cfg) {
 		.playTimeFirstMinutes = CFG_DEFAULT_PLAYTIME_FIRST_MINUTES,
 		.playTimeRepeatMinutes = CFG_DEFAULT_PLAYTIME_REPEAT_MINUTES,
 		.playTimeNotificationDuration = CFG_DEFAULT_PLAYTIME_NOTIFICATION_DURATION,
+		.playTimeLimitMinutes = CFG_DEFAULT_PLAYTIME_LIMIT_MINUTES,
+		.playTimeLimitWarnMinutes = CFG_DEFAULT_PLAYTIME_LIMIT_WARN_MINUTES,
+		.playTimeLimitGraceSeconds = CFG_DEFAULT_PLAYTIME_LIMIT_GRACE_SECONDS,
+		.playTimeLimitExtraMinutes = CFG_DEFAULT_PLAYTIME_LIMIT_EXTRA_MINUTES,
+		.playTimeLimitExtraMax = CFG_DEFAULT_PLAYTIME_LIMIT_EXTRA_MAX,
 
 		.raEnable = CFG_DEFAULT_RA_ENABLE,
 		.raUsername = CFG_DEFAULT_RA_USERNAME,
@@ -412,6 +417,26 @@ void CFG_init(FontLoad_callback_t cb, ColorSet_callback_t ccb) {
 			}
 			if (sscanf(line, "playTimeNotificationDuration=%i", &temp_value) == 1) {
 				CFG_setPlayTimeNotificationDuration(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeLimitMinutes=%i", &temp_value) == 1) {
+				CFG_setPlayTimeLimitMinutes(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeLimitWarnMinutes=%i", &temp_value) == 1) {
+				CFG_setPlayTimeLimitWarnMinutes(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeLimitGraceSeconds=%i", &temp_value) == 1) {
+				CFG_setPlayTimeLimitGraceSeconds(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeLimitExtraMinutes=%i", &temp_value) == 1) {
+				CFG_setPlayTimeLimitExtraMinutes(temp_value);
+				continue;
+			}
+			if (sscanf(line, "playTimeLimitExtraMax=%i", &temp_value) == 1) {
+				CFG_setPlayTimeLimitExtraMax(temp_value);
 				continue;
 			}
 			if (sscanf(line, "raEnable=%i", &temp_value) == 1) {
@@ -1147,6 +1172,51 @@ void CFG_setPlayTimeNotificationDuration(int seconds) {
 	CFG_sync();
 }
 
+int CFG_getPlayTimeLimitMinutes(void) {
+	return settings.playTimeLimitMinutes;
+}
+
+void CFG_setPlayTimeLimitMinutes(int value) {
+	settings.playTimeLimitMinutes = clamp(value, 0, 1440);
+	CFG_sync();
+}
+
+int CFG_getPlayTimeLimitWarnMinutes(void) {
+	return settings.playTimeLimitWarnMinutes;
+}
+
+void CFG_setPlayTimeLimitWarnMinutes(int value) {
+	settings.playTimeLimitWarnMinutes = clamp(value, 1, 60);
+	CFG_sync();
+}
+
+int CFG_getPlayTimeLimitGraceSeconds(void) {
+	return settings.playTimeLimitGraceSeconds;
+}
+
+void CFG_setPlayTimeLimitGraceSeconds(int value) {
+	settings.playTimeLimitGraceSeconds = clamp(value, 0, 900);
+	CFG_sync();
+}
+
+int CFG_getPlayTimeLimitExtraMinutes(void) {
+	return settings.playTimeLimitExtraMinutes;
+}
+
+void CFG_setPlayTimeLimitExtraMinutes(int value) {
+	settings.playTimeLimitExtraMinutes = clamp(value, 0, 480);
+	CFG_sync();
+}
+
+int CFG_getPlayTimeLimitExtraMax(void) {
+	return settings.playTimeLimitExtraMax;
+}
+
+void CFG_setPlayTimeLimitExtraMax(int value) {
+	settings.playTimeLimitExtraMax = clamp(value, 0, 99);
+	CFG_sync();
+}
+
 bool CFG_getRAEnable(void) {
 	return settings.raEnable;
 }
@@ -1522,6 +1592,11 @@ static int CFG_serialize(char* buf, size_t cap) {
 	EMIT("playTimeFirstMinutes=%i\n", settings.playTimeFirstMinutes);
 	EMIT("playTimeRepeatMinutes=%i\n", settings.playTimeRepeatMinutes);
 	EMIT("playTimeNotificationDuration=%i\n", settings.playTimeNotificationDuration);
+	EMIT("playTimeLimitMinutes=%i\n", settings.playTimeLimitMinutes);
+	EMIT("playTimeLimitWarnMinutes=%i\n", settings.playTimeLimitWarnMinutes);
+	EMIT("playTimeLimitGraceSeconds=%i\n", settings.playTimeLimitGraceSeconds);
+	EMIT("playTimeLimitExtraMinutes=%i\n", settings.playTimeLimitExtraMinutes);
+	EMIT("playTimeLimitExtraMax=%i\n", settings.playTimeLimitExtraMax);
 	EMIT("raEnable=%i\n", settings.raEnable);
 	EMIT("raUsername=%s\n", settings.raUsername);
 	EMIT("raPassword=%s\n", settings.raPassword);

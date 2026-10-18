@@ -92,5 +92,7 @@ void GameList_switchTab(int delta, bool* dirty);
 void GameList_openTab(MenuTabId id, bool* dirty);
 // Simple mode: launching Settings asks for the parent PIN (true = go ahead).
 bool GameList_settingsPinAllows(Entry* entry);
+// Daily play limit: explains a launch the supervisor refused and offers the PIN to add time.
+void GameList_playLimitNotice(void);
 
 #endif // GAMELIST_H

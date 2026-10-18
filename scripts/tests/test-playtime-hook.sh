@@ -18,11 +18,11 @@ FAIL=0
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAIL=$((FAIL + 1)); }
 
-# --- extract the hook (from NX_PLAYTIME_DAEMON="" through nx_playtime_stop) ---
+# --- extract the hook (from NX_PLAYTIME_DAEMON="" through nx_playtime_blocked) ---
 tr -d '\r' < "$SUP" | awk '
 	/^NX_PLAYTIME_DAEMON=""/ { p = 1 }
 	p { print }
-	p && /^nx_playtime_stop\(\)/ { s = 1 }
+	p && /^nx_playtime_blocked\(\)/ { s = 1 }
 	s && /^}/ { exit }
 ' > "$T/hook.raw"
 [ -s "$T/hook.raw" ] || { echo "FAIL: could not extract the hook from the supervisor"; exit 1; }
@@ -109,6 +109,30 @@ echo "$out" | grep -q 'start_rc=0 pid=unset' && pass "crashing helper: start ret
 rm -f "$T/tmp/nx-playtime.pid"; write_daemon wrongpid
 out="$(run_case wrongpid)"
 echo "$out" | grep -q 'start_rc=0 pid=unset' && pass "mismatched pid is rejected" || fail "mismatched pid accepted: $out"
+
+# 7) daily-limit gate: nx_playtime_blocked is true ONLY when the helper answers 3
+tr -d '\r' < "$SUP" | awk '/nx_playtime_blocked "\$NEXT_PATH"/{a=NR} /nx_playtime_start "\$NEXT_PATH"/{b=NR} /^[[:space:]]*eval "\$CMD"/{c=NR} END{exit !(a && b && c && a<b && b<c)}' && pass "gate runs before start/eval" || fail "gate is not ahead of start/eval"
+gate() { # $1 = what --check does: block | allow | crash | missing ; prints rc of nx_playtime_blocked
+	rm -f "$T/system/bin/playtimed.elf"
+	if [ "$1" != missing ]; then
+		cat > "$T/system/bin/playtimed.elf" <<EOF
+#!/bin/sh
+case "\$1" in
+	--check) case "$1" in block) exit 3 ;; allow) exit 0 ;; crash) exit 139 ;; esac ;;
+esac
+exit 2
+EOF
+		chmod +x "$T/system/bin/playtimed.elf"
+	fi
+	$SHELL_UNDER_TEST -c '
+		SYSTEM_PATH="$1"; export SYSTEM_PATH
+		. "$2"
+		nx_playtime_blocked "$3"; echo "rc=$?"' sh "$T/system" "$T/hook.sh" "$T/cmd.game" 2>/dev/null | tail -1
+}
+[ "$(gate block)" = "rc=0" ] && pass "gate: helper says 3 -> the launch is blocked" || fail "gate block: $(gate block)"
+[ "$(gate allow)" = "rc=1" ] && pass "gate: helper says 0 -> the launch goes ahead" || fail "gate allow: $(gate allow)"
+[ "$(gate crash)" = "rc=1" ] && pass "gate: crashing helper fails open" || fail "gate crash: $(gate crash)"
+[ "$(gate missing)" = "rc=1" ] && pass "gate: missing helper fails open" || fail "gate missing: $(gate missing)"
 
 if [ "$FAIL" -eq 0 ]; then echo "test-playtime-hook ($SHELL_UNDER_TEST): all checks passed"; exit 0; fi
 echo "test-playtime-hook: $FAIL FAILURE(S)"; exit 1

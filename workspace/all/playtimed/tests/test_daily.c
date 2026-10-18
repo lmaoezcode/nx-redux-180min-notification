@@ -99,6 +99,70 @@ int main(void) {
 	assert(!DailyPlayTime_gameCommand("'/mnt/SDCARD/Emus/GBA.pak/launch.sh' '/mnt/SDCARD/Roms/a.gba'; reboot", sd));
 	assert(!DailyPlayTime_gameCommand("'/mnt/SDCARD/Emus/GBA.pak/launch.sh' '/mnt/SDCARD/Roms/a.gba", sd));
 	assert(!DailyPlayTime_gameCommand(NULL, sd));
+
+	// ---- hard daily limit ----
+	{
+		const int today = 20261004;
+		DailyLimitConfig lim = {true, 60, 5, 180, 15, 3};
+		DailyExtra none = {0, 0};
+		DailyPlayTime t = {0};
+		char msg[128];
+		DailyPlayTime_tick(&t, today, 36000000, 0, false);
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_OK);
+		play(&t, 54);
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_OK);
+		play(&t, 1); // 55 min played, 5 left
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_WARN);
+		DailyLimit_message(DAILY_LIMIT_WARN, DailyLimit_remainingMs(&t, &lim, &none, today), 180, msg, sizeof(msg));
+		assert(strstr(msg, "5 min"));
+		play(&t, 4); // 59 min played
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_LAST);
+		play(&t, 1); // 60 min: reached, grace starts
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_REACHED);
+		DailyLimit_message(DAILY_LIMIT_REACHED, 0, 180, msg, sizeof(msg));
+		assert(strstr(msg, "3 min"));
+		play(&t, 2);
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_REACHED);
+		play(&t, 1); // 63 min: grace (3 min) used up
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_EXPIRED);
+		// A PIN unlock adds minutes for TODAY only and can be repeated up to the cap.
+		DailyExtra extra = {0, 0};
+		assert(DailyLimit_canGrant(&lim, &extra, today));
+		DailyLimit_grant(&extra, today);
+		assert(DailyLimit_allowanceMs(&lim, &extra, today) == 75 * DAILY_MINUTE_MS);
+		assert(DailyLimit_phase(&t, &lim, &extra, today) == DAILY_LIMIT_OK);
+		DailyLimit_grant(&extra, today);
+		DailyLimit_grant(&extra, today);
+		assert(!DailyLimit_canGrant(&lim, &extra, today)); // cap of 3
+		lim.extra_max = 0; // 0 = unlimited
+		assert(DailyLimit_canGrant(&lim, &extra, today));
+		lim.extra_max = 3;
+		assert(DailyLimit_allowanceMs(&lim, &extra, today + 1) == 60 * DAILY_MINUTE_MS); // old grants do not carry over
+		// Another day's ledger counts as nothing played.
+		assert(DailyLimit_phase(&t, &lim, &none, today + 1) == DAILY_LIMIT_OK);
+		// Disabled, or an allowance of a whole day, never triggers.
+		lim.enabled = false;
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_OK);
+		lim.enabled = true;
+		lim.limit_minutes = 1440;
+		assert(DailyLimit_phase(&t, &lim, &none, today) == DAILY_LIMIT_OK);
+		// warn_minutes of 1 leaves only the last-minute warning.
+		lim.limit_minutes = 60;
+		lim.warn_minutes = 1;
+		DailyPlayTime w = {0};
+		DailyPlayTime_tick(&w, today, 36000000, 0, false);
+		play(&w, 56);
+		assert(DailyLimit_phase(&w, &lim, &none, today) == DAILY_LIMIT_OK);
+		// The unlock record survives a restart and rejects garbage.
+		char rec[64];
+		DailyExtra back = {0, 0};
+		assert(DailyExtra_format(&extra, rec, sizeof(rec)) > 0 && DailyExtra_parse(&back, rec));
+		assert(back.date == today && back.count == 3);
+		assert(!DailyExtra_parse(&back, "NX_DAILY_EXTRA 1 20261340 1\n"));
+		assert(!DailyExtra_parse(&back, "NX_DAILY_EXTRA 2 20261004 1\n"));
+		assert(!DailyExtra_parse(&back, "NX_DAILY_EXTRA 1 20261004 -1\n"));
+		assert(!DailyExtra_parse(&back, "NX_DAILY_EXTRA 1 20261004 1 junk\n"));
+	}
 	puts("daily play time: all unit checks passed");
 	return 0;
 }

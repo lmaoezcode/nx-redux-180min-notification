@@ -380,6 +380,15 @@ nx_playtime_stop() {
 	unset NX_PLAYTIME_PID
 }
 
+# Exit 0 only when the daily limit blocks THIS launch. A missing helper, a tool,
+# a disabled limit or any error all let the launch through (the limit never
+# locks the device).
+nx_playtime_blocked() {
+	[ -n "$NX_PLAYTIME_DAEMON" ] || return 1
+	"$NX_PLAYTIME_DAEMON" --check "$1" >/dev/null 2>&1
+	[ $? -eq 3 ]
+}
+
 touch "$EXEC_PATH"  && sync
 while [ -f $EXEC_PATH ]; do
 	nx_update_logs_path
@@ -409,9 +418,16 @@ while [ -f $EXEC_PATH ]; do
 		case "$CMD" in
 			*"USB Storage.pak"*) PAK_RETURN_DIR="$PWD"; cd /tmp || exit 1 ;;
 		esac
-		nx_playtime_start "$NEXT_PATH"
-		eval "$CMD"
-		nx_playtime_stop
+		rm -f /tmp/nx-playtime-blocked
+		if nx_playtime_blocked "$NEXT_PATH"; then
+			# Daily limit used up (Simple Mode): the game does not start. nextui
+			# reads this file and tells the player, with a PIN to add time.
+			echo "$CMD" > /tmp/nx-playtime-blocked
+		else
+			nx_playtime_start "$NEXT_PATH"
+			eval "$CMD"
+			nx_playtime_stop
+		fi
 		# If USB could not release the block device, do not launch SD programs
 		# or restore MTP behind the safety guard. Logs and recovery stay in RAM.
 		if [ -f /tmp/nx_usb_storage_remount_blocked ]; then
