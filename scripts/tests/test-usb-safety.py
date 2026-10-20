@@ -63,7 +63,7 @@ def run(base, script, scenario, setup='true', guarded=True, extra_env=None):
     if not guarded:
         # Exercise the script's own guard gate: no NX_USB_GUARDED, guard missing.
         env.pop('NX_USB_GUARDED')
-        env['NX_USB_GUARD'] = unix(base / 'system/bin/no-such-guard.elf')
+        env.setdefault('NX_USB_GUARD', unix(base / 'system/bin/no-such-guard.elf'))
     command = ('chmod +x "$FIXTURE/bin"/* "$FIXTURE/system/bin"/* '
                '"$FIXTURE/stock/usb_storage" "$FIXTURE/setter.sh" 2>/dev/null; '
                'export PATH="$FIXTURE/bin:$PATH"; ' + setup + '; sh ' + script)
@@ -235,6 +235,7 @@ def transformed_helper(base):
         '/tmp/nx_usb_storage_active': unix(base / 'active'),
         '/tmp/nx_usb_gamepad_active': unix(base / 'gamepad-active'),
         '/tmp/nx_usb_link_active': unix(base / 'link-active'),
+        '/tmp/nx_usb_owner': unix(base / 'owner'),
         '/dev/ffs-umtp': unix(base / 'ffs'),
         '/mnt/SDCARD': unix(base / 'sd'),
         '/proc/mounts': unix(base / 'mounts'),
@@ -449,6 +450,8 @@ LINK_SCENARIOS = (
     'link_status', 'link_status_none',
     'link_blocks_stop', 'link_blocks_restore', 'link_blocks_storage_start',
     'link_blocks_ok_without_marker',
+    'heal_none', 'heal_link', 'heal_owner_only', 'heal_unknown_owner',
+    'status_owner_gamepad', 'check_ok', 'check_guard_missing', 'check_guard_abort',
 )
 for scenario in LINK_SCENARIOS:
     with scratch('nxusb-link-') as base:
@@ -499,6 +502,7 @@ exit 0
 
         action = 'link-start'
         guarded = True
+        extra = None
         if scenario in ('link_start_from_mtp', 'link_start_fail_gives_mtp_back'):
             mtp_active()
         elif scenario == 'link_start_storage_marker':
@@ -514,9 +518,37 @@ exit 0
         elif scenario in ('link_stop_adb', 'link_stop_no_binary'):
             action = 'link-stop'
             put(base / 'link-active', 'adb\n')
+            put(base / 'owner', 'owner=link prior=adb since=1.00\n')
         elif scenario in ('link_stop_mtp', 'link_stop_mtp_fails'):
             action = 'link-stop'
             put(base / 'link-active', 'mtp\n')
+            put(base / 'owner', 'owner=link prior=mtp since=1.00\n')
+        elif scenario == 'heal_none':
+            action = 'heal'
+        elif scenario == 'heal_link':
+            action = 'heal'
+            put(base / 'link-active', 'mtp\n')
+            put(base / 'owner', 'owner=link prior=mtp since=1.00\n')
+        elif scenario == 'heal_owner_only':
+            action = 'heal'
+            put(base / 'owner', 'owner=link prior=adb since=1.00\n')
+        elif scenario == 'heal_unknown_owner':
+            action = 'heal'
+            put(base / 'owner', 'owner=gamepad prior=mtp since=1.00\n')
+        elif scenario == 'status_owner_gamepad':
+            action = 'status'
+            put(base / 'owner', 'owner=gamepad prior=mtp since=1.00\n')
+        elif scenario in ('check_ok', 'check_guard_missing', 'check_guard_abort'):
+            # check is read-only and runs without the guard gate; it names the guard
+            # through NX_USB_GUARD, and an unguarded run proves the gate is skipped.
+            action = 'check'
+            guarded = False
+            if scenario == 'check_ok':
+                put(base / 'system/bin/nx_usb_guard.elf', '#!/bin/sh\nexit 0\n')
+                extra = {'NX_USB_GUARD': unix(base / 'system/bin/nx_usb_guard.elf')}
+            elif scenario == 'check_guard_abort':
+                put(base / 'system/bin/nx_usb_guard.elf', '#!/bin/sh\nkill -ABRT $$\n')
+                extra = {'NX_USB_GUARD': unix(base / 'system/bin/nx_usb_guard.elf')}
         elif scenario == 'link_stop_no_marker':
             action = 'link-stop'
         elif scenario == 'link_stop_guard_missing':
@@ -538,15 +570,18 @@ exit 0
             if scenario == 'link_blocks_storage_start':
                 put(base / 'mounts', '')
         transformed_helper(base)
-        result = run(base, '"$FIXTURE/system/bin/nx_usb_mode.sh" ' + action, scenario, guarded=guarded)
+        result = run(base, '"$FIXTURE/system/bin/nx_usb_mode.sh" ' + action, scenario, guarded=guarded,
+                     extra_env=extra)
         events = (base / 'events').read_text().splitlines()
         mode_log = (base / 'mode.log').read_text() if (base / 'mode.log').exists() else ''
         marker = (base / 'link-active').read_text().strip() if (base / 'link-active').exists() else None
-        details = (scenario, result.returncode, events, marker, result.stdout, result.stderr, mode_log)
+        owner = (base / 'owner').read_text().strip() if (base / 'owner').exists() else None
+        details = (scenario, result.returncode, events, marker, result.stdout, result.stderr, mode_log, owner)
 
         ok_scenarios = ('link_start_from_mtp', 'link_start_from_adb', 'link_start_twice',
                         'link_stop_adb', 'link_stop_mtp', 'link_stop_no_marker', 'link_stop_no_binary',
-                        'link_status', 'link_status_none', 'link_blocks_ok_without_marker')
+                        'link_status', 'link_status_none', 'link_blocks_ok_without_marker',
+                        'heal_none', 'heal_link', 'heal_owner_only', 'status_owner_gamepad', 'check_ok')
         assert (result.returncode == 0) == (scenario in ok_scenarios), details
 
         if scenario == 'link_start_from_mtp':
@@ -593,6 +628,37 @@ exit 0
             assert 'USB link is active' in mode_log, details
         elif scenario == 'link_blocks_ok_without_marker':
             assert 'setter:adb' in events, details
+        elif scenario == 'heal_none':
+            assert events == [] and owner is None and 'nothing to do' in mode_log, details
+        elif scenario == 'heal_link':
+            # Same path as link-stop: daemon repaired, MTP back, marker AND record gone.
+            assert events[0] == 'usblink:stop' and marker is None and owner is None, details
+        elif scenario == 'heal_owner_only':
+            assert events == ['usblink:stop'] and owner is None, details
+        elif scenario == 'heal_unknown_owner':
+            # No heal action for it yet: refuse, leave the record, touch nothing.
+            assert events == [] and owner == 'owner=gamepad prior=mtp since=1.00', details
+            assert "owner 'gamepad' has no heal action yet" in mode_log, details
+        elif scenario == 'status_owner_gamepad':
+            assert result.stdout.strip() == 'gamepad' and events == [], details
+        elif scenario == 'check_ok':
+            assert result.stdout.strip() == 'ok' and result.stderr == '', details
+        elif scenario == 'check_guard_missing':
+            assert result.returncode == 1 and result.stdout.strip() == 'guard-missing', details
+            assert 'Missing USB transaction guard' not in result.stderr, details
+        elif scenario == 'check_guard_abort':
+            assert result.returncode == 1 and result.stdout.startswith('guard-abort rc='), details
+        # The owner record follows the link marker (S1 writes it next to the old marker).
+        if scenario == 'link_start_from_mtp':
+            assert owner is not None and owner.startswith('owner=link prior=mtp since='), details
+        elif scenario == 'link_start_from_adb':
+            assert owner is not None and owner.startswith('owner=link prior=adb since='), details
+        elif scenario in ('link_start_fail_gives_mtp_back', 'link_start_storage_marker',
+                          'link_start_gamepad_marker', 'link_start_no_usblink', 'link_start_storage_mode',
+                          'link_stop_adb', 'link_stop_mtp', 'link_stop_no_binary', 'link_stop_no_marker'):
+            assert owner is None, details
+        elif scenario == 'link_stop_mtp_fails':
+            assert owner == 'owner=link prior=mtp since=1.00', details
         print('PASS usb link', scenario, flush=True)
 
 

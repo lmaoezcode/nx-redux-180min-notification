@@ -399,6 +399,76 @@ link_active() {
 	[ -e "$LINK_MARKER" ]
 }
 
+# --- owner record -------------------------------------------------------------
+# owner_set <owner> <prior>: written atomically (temp file + rename).
+owner_set() {
+	owner_tmp="$OWNER_FILE.$$"
+	printf 'owner=%s prior=%s since=%s\n' "$1" "$2" "$(cut -d' ' -f1 /proc/uptime 2>/dev/null)" > "$owner_tmp" &&
+		mv -f "$owner_tmp" "$OWNER_FILE" || { rm -f "$owner_tmp"; return 1; }
+}
+
+# owner_field <name>: value of one field, or failure when there is no record.
+owner_field() {
+	[ -r "$OWNER_FILE" ] || return 1
+	owner_line=""
+	read -r owner_line < "$OWNER_FILE" || true
+	for owner_part in $owner_line; do
+		case "$owner_part" in
+			"$1="*) printf '%s\n' "${owner_part#*=}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# owner_clear_if <owner>: drops the record only when it is that owner's.
+owner_clear_if() {
+	[ "$(owner_field owner)" = "$1" ] && rm -f "$OWNER_FILE"
+	return 0
+}
+
+# What `status` prints: the owner of a running session, else the data mode.
+report_status() {
+	if link_active; then
+		echo "link"
+		return 0
+	fi
+	report_owner="$(owner_field owner)" || report_owner=""
+	case "$report_owner" in
+		link | gamepad | storage) echo "$report_owner" ;;
+		*) current_mode ;;
+	esac
+}
+
+# Read-only: can the guard start at all? (a static binary built for a newer
+# kernel aborts with "kernel too old" before it does anything.) First word is
+# machine-readable: ok | guard-missing | guard-abort.
+check_guard() {
+	if [ ! -x "$USB_GUARD" ]; then
+		echo "guard-missing"
+		return 1
+	fi
+	"$USB_GUARD" --holders /nx-usb-guard-preflight >/dev/null 2>&1
+	check_rc=$?
+	if [ "$check_rc" -ne 0 ]; then
+		echo "guard-abort rc=$check_rc"
+		return 1
+	fi
+	echo "ok"
+}
+
+# Gives the gadget back from whatever session was left behind. Idempotent.
+heal() {
+	heal_owner="$(owner_field owner)" || heal_owner=""
+	if link_active || [ "$heal_owner" = link ]; then
+		link_stop
+		return $?
+	fi
+	case "$heal_owner" in
+		"") log "heal: no USB owner; nothing to do"; return 0 ;;
+		*) log "heal: owner '$heal_owner' has no heal action yet"; return 1 ;;
+	esac
+}
+
 refuse_if_link() {
 	link_active || return 0
 	log "USB link is active; $1 refused (leave USB Cable netplay or run link-stop)"
@@ -426,12 +496,13 @@ link_start() {
 		adb) ;;
 		*) log "USB mode '$link_prior' cannot host the USB link"; return 1 ;;
 	esac
-	# Marker before the daemon: a crash from here on is repaired by link-stop.
+	# Marker (and owner record) before the daemon: a crash from here on is repaired by link-stop.
 	printf '%s\n' "$link_prior" > "$LINK_MARKER" || {
 		log "could not write $LINK_MARKER"
 		[ "$link_prior" != mtp ] || start_mtp || true
 		return 1
 	}
+	owner_set link "$link_prior" || log "could not write $OWNER_FILE"
 	if ! "$USBLINK_BIN" start >> "$LOG" 2>&1; then
 		log "usblink start failed; repairing the gadget"
 		link_stop || true
@@ -454,6 +525,7 @@ link_stop() {
 		log "usblink is missing: $USBLINK_BIN; nothing to repair"
 	fi
 	if [ ! -e "$LINK_MARKER" ]; then
+		owner_clear_if link
 		log "no USB link marker; gadget repaired only"
 		return 0
 	fi
@@ -465,6 +537,7 @@ link_stop() {
 		start_mtp || { log "MTP restore after the USB link failed"; return 1; }
 	fi
 	rm -f "$LINK_MARKER"
+	owner_clear_if link
 	log "USB link stopped (mode restored: $link_prior)"
 	checkpoint link_stop_end
 	return 0

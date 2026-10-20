@@ -20,6 +20,10 @@ STORAGE_MARKER=/tmp/nx_usb_storage_active
 # written by link-start: `status` prints "link" while the latter exists.
 GAMEPAD_MARKER=/tmp/nx_usb_gamepad_active
 LINK_MARKER=/tmp/nx_usb_link_active
+# One record of who owns the gadget for a long session (owner=link|gamepad|storage,
+# prior=mtp|adb, since=uptime). Today only link writes it; the old per-tool markers
+# stay authoritative until the other owners move onto it.
+OWNER_FILE=/tmp/nx_usb_owner
 SCRIPT_DIR="${NX_USB_RUNTIME_DIR:-$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)}"
 UMTP_BIN="$SCRIPT_DIR/umtprd"
 USBLINK_BIN="${NX_USBLINK_BIN:-$SCRIPT_DIR/usblink.elf}"
@@ -35,7 +39,8 @@ NX_USB_LIB_FILE="${NX_USB_LIB:-$SCRIPT_DIR/nx_usb_lib.sh}"
 # Native guard owns a separate mutex and arms a detached guardian before
 # pausing the exact stock ADB instance. Never suspend ADB from bare shell:
 # loss of that shell/session must not leave ADB stopped indefinitely.
-if [ "$ACTION" != status ] && [ "${NX_USB_GUARDED:-0}" != 1 ]; then
+# status and check only read; every other action changes USB state and is guarded.
+if [ "$ACTION" != status ] && [ "$ACTION" != check ] && [ "${NX_USB_GUARDED:-0}" != 1 ]; then
 	[ -x "$USB_GUARD" ] || { echo "Missing USB transaction guard: $USB_GUARD" >&2; exit 1; }
 	export NX_USB_GUARDED=1
 	exec "$USB_GUARD" /bin/sh "$0" "$@"
@@ -52,15 +57,11 @@ case "$ACTION" in
 	storage-detach) storage_detach ;;
 	link-start) link_start ;;
 	link-stop) link_stop ;;
-	status)
-		if link_active; then
-			echo "link"
-		else
-			current_mode
-		fi
-		;;
+	heal) heal ;;
+	check) check_guard ;;
+	status) report_status ;;
 	*)
-		echo "usage: $0 {start|stop|restore|status|link-start|link-stop|storage-start /dev/mmcblk1p1|storage-detach}" >&2
+		echo "usage: $0 {start|stop|restore|status|check|heal|link-start|link-stop|storage-start /dev/mmcblk1p1|storage-detach}" >&2
 		exit 2
 		;;
 esac
