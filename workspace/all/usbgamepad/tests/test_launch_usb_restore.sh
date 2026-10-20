@@ -12,6 +12,7 @@ HERE="$(CDPATH= cd "$(dirname "$0")" && pwd)"
 REPO="$(CDPATH= cd "$HERE/../../../.." && pwd)"
 LAUNCH="$REPO/skeleton/SYSTEM/tg5040/paks/Tools/USB Gamepad.pak/launch.sh"
 REAL_MODE="$REPO/skeleton/SYSTEM/tg5040/bin/nx_usb_mode.sh"
+REAL_LIB="$REPO/skeleton/SYSTEM/tg5040/bin/nx_usb_lib.sh"
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/nxgp-test.XXXXXX")" || exit 1
 trap 'rm -rf "$T"' EXIT
@@ -233,6 +234,7 @@ check "helper not called at all" test ! -s "$T/state/calls"
 CASES=$((CASES + 1)); CASE_NAME="real script, guard missing"
 mkdir -p "$T/real"; : > "$T/real/ran"
 cp "$REAL_MODE" "$T/real/nx_usb_mode.sh"
+cp "$REAL_LIB" "$T/real/nx_usb_lib.sh"
 NX_USB_GUARD="$T/real/does-not-exist.elf" /bin/sh "$T/real/nx_usb_mode.sh" restore >/dev/null 2>"$T/real/err"
 RC=$?
 check "exit status 1" rc_is 1

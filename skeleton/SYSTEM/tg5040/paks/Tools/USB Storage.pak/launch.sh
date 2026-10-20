@@ -5,6 +5,7 @@
 STOCK_DIR=/usr/trimui/apps/usb_storage
 STAGED_LAUNCHER=/tmp/nx-usb-storage-stage.sh
 STAGED_HELPER=/tmp/nx-usb-storage-mode.sh
+STAGED_LIB=/tmp/nx-usb-lib.sh
 STAGED_DIAG=/tmp/nx-usb-diag.sh
 STAGED_SERVICES=/tmp/nx-usb-services.sh
 STAGED_GUARD=/tmp/nx-usb-guard.elf
@@ -14,12 +15,14 @@ STORAGE_MARKER=/tmp/nx_usb_storage_active
 SESSION_LOCK=/tmp/nx_usb_storage_session.lock
 BLOCKED_MARKER=/tmp/nx_usb_storage_remount_blocked
 ORIGINAL_HELPER="${SYSTEM_PATH:-/mnt/SDCARD/.system}/bin/nx_usb_mode.sh"
+ORIGINAL_LIB="${SYSTEM_PATH:-/mnt/SDCARD/.system}/bin/nx_usb_lib.sh"
 ORIGINAL_GUARD="${SYSTEM_PATH:-/mnt/SDCARD/.system}/bin/nx_usb_guard.elf"
 
 if [ "${NX_USB_STORAGE_STAGED:-0}" != 1 ]; then
-	[ -x "$STOCK_DIR/usb_storage" ] && [ -x "$ORIGINAL_HELPER" ] && [ -x "$ORIGINAL_GUARD" ] || exit 1
+	[ -x "$STOCK_DIR/usb_storage" ] && [ -x "$ORIGINAL_HELPER" ] && [ -r "$ORIGINAL_LIB" ] && [ -x "$ORIGINAL_GUARD" ] || exit 1
 	mkdir "$SESSION_LOCK" 2>/dev/null || { echo "USB Storage already running"; exit 1; }
 	if ! cp -f "$0" "$STAGED_LAUNCHER" || ! cp -f "$ORIGINAL_HELPER" "$STAGED_HELPER" ||
+		! cp -f "$ORIGINAL_LIB" "$STAGED_LIB" ||
 		! cp -f "${SYSTEM_PATH:-/mnt/SDCARD/.system}/bin/nx_usb_services.sh" "$STAGED_SERVICES" ||
 		! cp -f "$ORIGINAL_GUARD" "$STAGED_GUARD"; then
 		rmdir "$SESSION_LOCK" 2>/dev/null
@@ -33,6 +36,7 @@ if [ "${NX_USB_STORAGE_STAGED:-0}" != 1 ]; then
 	cd /tmp || exit 1
 	export NX_USB_STORAGE_STAGED=1
 	export NX_USB_GUARD="$STAGED_GUARD"
+	export NX_USB_LIB="$STAGED_LIB"
 	exec /bin/sh "$STAGED_LAUNCHER" "$@"
 fi
 
@@ -121,7 +125,7 @@ cleanup() {
 	done
 	echo "USB Storage finished: USB detached before SD remount; original mode=$USB_MODE_BEFORE"
 	save_logs || true
-	rm -f /tmp/stay_awake "$STAGED_LAUNCHER" "$STAGED_HELPER" "$STAGED_SERVICES" "$STAGED_GUARD"
+	rm -f /tmp/stay_awake "$STAGED_LAUNCHER" "$STAGED_HELPER" "$STAGED_LIB" "$STAGED_SERVICES" "$STAGED_GUARD"
 	rmdir "$SESSION_LOCK" 2>/dev/null || true
 	return "$cleanup_result"
 }

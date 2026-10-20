@@ -528,6 +528,7 @@ Trên tg5040, `nx_usb_mode.sh` ghép uMTP-Responder FunctionFS với ADB. Các a
 Runtime nằm ở:
 
 - `skeleton/SYSTEM/tg5040/bin/nx_usb_mode.sh`
+- `skeleton/SYSTEM/tg5040/bin/nx_usb_lib.sh` (các hàm của cửa; `nx_usb_mode.sh` nạp nó bằng `.` và thoát 1 "Missing USB library" TRƯỚC khi guard tạm dừng ADB nếu thiếu; USB Storage chép bản của nó vào `/tmp/nx-usb-lib.sh` và đặt `NX_USB_LIB`). Hai tệp phải được cài cùng nhau.
 - `skeleton/SYSTEM/tg5040/bin/umtprd`
 - `skeleton/SYSTEM/tg5040/etc/umtprd.conf`
 

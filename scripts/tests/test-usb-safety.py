@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BASH = r'C:\Program Files\Git\bin\bash.exe' if os.name == 'nt' else '/bin/bash'
 WRAPPER = ROOT / 'skeleton/SYSTEM/tg5040/paks/Tools/USB Storage.pak/launch.sh'
 HELPER = ROOT / 'skeleton/SYSTEM/tg5040/bin/nx_usb_mode.sh'
+LIB = ROOT / 'skeleton/SYSTEM/tg5040/bin/nx_usb_lib.sh'
 DIAG = ROOT / 'skeleton/SYSTEM/tg5040/bin/nx_usb_diag.sh'
 SERVICES = ROOT / 'skeleton/SYSTEM/tg5040/bin/nx_usb_services.sh'
 STAGED_DIR = Path(os.environ['NX_USB_TEST_STAGED_DIR']) if os.environ.get('NX_USB_TEST_STAGED_DIR') else None
@@ -49,7 +50,7 @@ def put(path, content):
     path.write_text(content, encoding='utf-8', newline='\n')
 
 
-def run(base, script, scenario, setup='true', guarded=True):
+def run(base, script, scenario, setup='true', guarded=True, extra_env=None):
     env = os.environ.copy()
     if os.name == 'nt':
         # Git Bash otherwise deep-copies directory targets instead of making
@@ -57,6 +58,8 @@ def run(base, script, scenario, setup='true', guarded=True):
         env['MSYS'] = 'winsymlinks:sys'
     env.update(FIXTURE=unix(base), SCENARIO=scenario, SDCARD_PATH=unix(base / 'sd'),
                SYSTEM_PATH=unix(base / 'system'), PLATFORM='tg5040', NX_USB_GUARDED='1')
+    if extra_env:
+        env.update(extra_env)
     if not guarded:
         # Exercise the script's own guard gate: no NX_USB_GUARDED, guard missing.
         env.pop('NX_USB_GUARDED')
@@ -83,6 +86,7 @@ while ! /usr/bin/grep -q 'stock UI ready' "$FIXTURE/storage.log"; do /usr/bin/sl
 echo ui >> "$FIXTURE/events"
 ''')
     put(base / 'system/bin/nx_usb_guard.elf', '#!/bin/sh\nexit 0\n')
+    put(base / 'system/bin/nx_usb_lib.sh', '# fixture library (the wrapper tests stub the helper itself)\n')
     put(base / 'mounts', '/dev/mmcblk1p1 ' + unix(base / 'sd') + ' exfat rw 0 0\n')
     put(base / 'swaps', 'Filename Type Size Used Priority\n')
     put(base / 'events', '')
@@ -96,6 +100,7 @@ def transformed_wrapper(base):
         '/usr/trimui/apps/usb_storage': unix(base / 'stock'),
         '/tmp/nx-usb-storage-stage.sh': unix(base / 'stage.sh'),
         '/tmp/nx-usb-storage-mode.sh': unix(base / 'stage-mode.sh'),
+        '/tmp/nx-usb-lib.sh': unix(base / 'stage-lib.sh'),
         '/tmp/nx-usb-diag.sh': unix(base / 'diag.sh'),
         '/tmp/nx-usb-services.sh': unix(base / 'services.sh'),
         '/tmp/nx-usb-guard.elf': unix(base / 'guard.sh'),
@@ -223,8 +228,7 @@ echo "/dev/mmcblk1p1 $SDCARD_PATH exfat rw 0 0" >> "$FIXTURE/mounts"
 
 
 def transformed_helper(base):
-    script = HELPER.read_text(encoding='utf-8')
-    for before, after in {
+    replacements = {
         '/sys/kernel/config/usb_gadget/g1': unix(base / 'gadget'),
         '/tmp/nx_usb_mode.lock': unix(base / 'mode.lock'),
         '/tmp/nx-mtp.log': unix(base / 'mode.log'),
@@ -238,12 +242,15 @@ def transformed_helper(base):
         '/bin/setusbconfig': unix(base / 'setter.sh'),
         '/sys/class/udc': unix(base / 'udc'),
         '/sys/devices/platform/soc/usbc0': unix(base / 'usb-role'),
-    }.items():
-        script = script.replace(before, after)
-    # ONLY the block-node existence probe is mocked; device selection,
-    # alias resolution, function/LUN/ADB/bind verification run unchanged.
-    script = script.replace('[ -b "$STORAGE_DEVICE" ]', '[ -f "$FIXTURE/block-device-present" ]')
-    put(base / 'system/bin/nx_usb_mode.sh', script)
+    }
+    for source, target in ((HELPER, 'nx_usb_mode.sh'), (LIB, 'nx_usb_lib.sh')):
+        script = source.read_text(encoding='utf-8')
+        for before, after in replacements.items():
+            script = script.replace(before, after)
+        # ONLY the block-node existence probe is mocked; device selection,
+        # alias resolution, function/LUN/ADB/bind verification run unchanged.
+        script = script.replace('[ -b "$STORAGE_DEVICE" ]', '[ -f "$FIXTURE/block-device-present" ]')
+        put(base / 'system/bin' / target, script)
 
 
 for scenario in ('mtp_missing_sd', 'mtp_marker', 'mtp_open_lun', 'mtp_idempotent', 'mtp_none_status',
@@ -391,6 +398,43 @@ exec /usr/bin/cat "$@"
             check = run(base, '-c "test ! -L \\\"$FIXTURE/gadget/configs/c.1/f1\\\""', scenario)
             assert check.returncode == 0, details
         print('PASS coordinator', scenario, flush=True)
+
+# The helper is a door (nx_usb_mode.sh) plus a library (nx_usb_lib.sh). A missing or
+# misplaced library must stop everything BEFORE the guard pauses ADB or any gadget
+# file is touched.
+for scenario in ('lib_missing', 'lib_env_override', 'lib_env_missing', 'lib_status_unguarded'):
+    with scratch('nxusb-lib-') as base:
+        prepare(base)
+        put(base / 'block-device-present', '')
+        put(base / 'gadget/UDC', 'controller\n')
+        put(base / 'ffs/ep1', '')
+        put(base / 'bin/pidof', '#!/bin/sh\n[ -f "$FIXTURE/process" ]\n')
+        transformed_helper(base)
+        extra = None
+        guarded = True
+        if scenario == 'lib_missing':
+            (base / 'system/bin/nx_usb_lib.sh').unlink()
+        elif scenario == 'lib_env_override':
+            # The USB Storage wrapper runs a staged copy of the door from /tmp and
+            # points NX_USB_LIB at its staged library.
+            (base / 'elsewhere').mkdir()
+            (base / 'system/bin/nx_usb_lib.sh').rename(base / 'elsewhere/lib.sh')
+            extra = {'NX_USB_LIB': unix(base / 'elsewhere/lib.sh')}
+        elif scenario == 'lib_env_missing':
+            extra = {'NX_USB_LIB': unix(base / 'elsewhere/none.sh')}
+        elif scenario == 'lib_status_unguarded':
+            guarded = False
+        result = run(base, '"$FIXTURE/system/bin/nx_usb_mode.sh" status', scenario,
+                     guarded=guarded, extra_env=extra)
+        events = (base / 'events').read_text().splitlines()
+        details = (scenario, result.returncode, events, result.stdout, result.stderr)
+        if scenario in ('lib_missing', 'lib_env_missing'):
+            assert result.returncode == 1 and 'Missing USB library' in result.stderr, details
+            assert result.stdout.strip() == '' and events == [], details
+        else:
+            # status needs neither the guard nor a bound function; it prints a mode.
+            assert result.returncode == 0 and result.stdout.strip() == 'adb', details
+        print('PASS usb lib', scenario, flush=True)
 
 # USB Cable netplay link (usblink): nx_usb_mode.sh owns the gadget while it runs.
 # usblink.elf is a fixture that only records its arguments; the mode logic,
